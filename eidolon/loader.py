@@ -38,7 +38,8 @@ def _cleanup_legacy_scaffolds(modules_dir):
 def iter_module_files(modules_dir):
     try:
         for root, dirs, files in os.walk(modules_dir):
-            dirs[:] = sorted(d for d in dirs if not d.startswith(("_", "@")))
+            # Ignore directories starting with _, src, or lib
+            dirs[:] = sorted(d for d in dirs if not d.startswith(("_", "@", "src", "lib")))
             for fn in sorted(files):
                 if not fn.endswith(".py") or fn.startswith(("_", "@")): continue
                 path = os.path.join(root, fn)
