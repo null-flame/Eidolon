@@ -7,7 +7,14 @@ import shlex
 import traceback
 import shutil
 import glob
-import readline
+
+try:
+    import readline
+    readline.set_completer_delims(' \t\n')
+    readline.parse_and_bind("tab: complete")
+except ImportError:
+    pass
+
 from pathlib import Path
 
 from eidolon.colors import C, rl_prompt_safe, c
@@ -64,16 +71,6 @@ class Eidolon(cmd.Cmd):
         self._update_prompt()
 
     def preloop(self):
-        # BUGFIX: Tell readline to ONLY break words on space, tab, and newline.
-        readline.set_completer_delims(' \t\n')
-        
-        # BUGFIX: Display only basename in tab completion hints
-        def display_hook(substitution, matches, longest_match_length):
-            for m in matches:
-                print(os.path.basename(m.rstrip('/')))
-            matches.clear()
-        readline.set_completion_display_matches_hook(display_hook)
-
         print_splash()
         _cleanup_legacy_scaffolds(MODULES_DIR)
         self.load_modules()
@@ -311,14 +308,193 @@ class Eidolon(cmd.Cmd):
         self.load_modules()
         ok("arsenal reloaded")
 
-    # ... (rest of the file remains the same: status, whoami, operator, exit, modules, search, info, use, back, options, show, set, unset, run, sessions, setg, globals, completions) ...
-    # For brevity, I'll include the completion functions that are relevant to repo.
-    def complete_repo(self, text, line, begidx, endidx):
-        cmds = ["list", "add", "remove", "sync", "install"]
-        if begidx == 5: # After "repo "
-            return [c for c in cmds if c.startswith(text)]
-        return []
+    def do_status(self, arg):
+        """status — show operator status"""
+        sessions = self.db.get_sessions()
+        active = sum(1 for s in sessions if s["status"] == "active")
+        print(f"\n  {C.PURPLE}╭─ OPERATOR STATUS ──────────────────╮{C.RESET}")
+        print(f"  {C.PURPLE}│{C.RESET}  name      : {C.BOLD}{self.operator_name}{C.RESET}")
+        print(f"  {C.PURPLE}│{C.RESET}  team      : {C.CYAN}{self.operator_team}{C.RESET}")
+        print(f"  {C.PURPLE}│{C.RESET}  uptime    : {_uptime_str(self.session_t0)}")
+        print(f"  {C.PURPLE}│{C.RESET}  workspace : {C.GREEN}{WORKSPACE_DIR}{C.RESET}")
+        print(f"  {C.PURPLE}│{C.RESET}  sessions  : {C.GREEN}{active}{C.RESET} active")
+        print(f"  {C.PURPLE}╰────────────────────────────────────╯\n")
 
+    def do_whoami(self, arg): self.do_status("")
+
+    def do_operator(self, arg):
+        parts = arg.strip().split(maxsplit=1)
+        if not parts: return print(f"operator: {self.operator_name} @ {self.operator_team}")
+        field, value = parts[0].lower(), (parts[1].strip() if len(parts) > 1 else "")
+        if field == "name" and value: self.operator_name = value; ok("name updated")
+        elif field == "team" and value: self.operator_team = value; ok("team updated")
+        else: err("usage: operator name|team <val>")
+
+    def do_exit(self, arg):
+        """exit / quit — leave tool"""
+        if self._subshell_active:
+            self.exit_subshell(); ok("returned to Eidolon"); return False
+        print(f"\n  {C.PURPLE}╰─{C.RESET} {C.CYAN}eidolon out.{C.RESET}  {C.GRAY}uptime: {_uptime_str(self.session_t0)}{C.RESET}\n")
+        return True
+
+    do_quit = do_exit
+    def do_EOF(self, arg): print(); return self.do_exit(arg)
+
+    def do_modules(self, arg):
+        if not self.modules: return warn("no modules loaded.")
+        rows = []
+        for i, (name, m) in enumerate(sorted(self.modules.items()), 1):
+            rows.append([f"{C.PURPLE}{i:02d}{C.RESET}", f"{C.CYAN}{name}{C.RESET}", _type_label(m), getattr(m, "CATEGORY", "-"), str(getattr(m, "DESCRIPTION", "-"))[:36]])
+        print_table(["#", "Arsenal", "Type", "Category", "Description"], rows, title=f"EIDOLON ARSENAL ({len(self.modules)})")
+    do_list = do_ls = do_arsenal = do_modules
+
+    def do_search(self, arg):
+        kw = arg.strip().lower()
+        if not kw: return err("usage: search <keyword>")
+        hits = [name for name, m in self.modules.items() if kw in (name + str(getattr(m, "DESCRIPTION", ""))).lower()]
+        if not hits: return warn("no matches.")
+        for h in sorted(hits): print(f"     {C.PINK}▸{C.RESET} {h}")
+
+    def do_info(self, arg):
+        name = self._resolve(arg)
+        if not name: return err(f"not found: '{arg.strip()}'")
+        m = self.modules[name]
+        print(f"\n  {C.PURPLE}╭─ MODULE INTEL ─────────────────────╮{C.RESET}")
+        print(f"  {C.PURPLE}│{C.RESET} name: {c(name, C.WHITE)}")
+        print(f"  {C.PURPLE}│{C.RESET} type: {_type_label(m)} | cat: {getattr(m,'CATEGORY','-')}")
+        print(f"  {C.PURPLE}│{C.RESET} desc: {getattr(m,'DESCRIPTION','-')}")
+        print(f"  {C.PURPLE}│{C.RESET} file: {getattr(m,'__eidolon_path__','?')}")
+        print(f"  {C.PURPLE}╰────────────────────────────────────╯")
+        opts = getattr(m, "OPTIONS", {})
+        if opts:
+            rows = [[k, str(v.get("value", "")), "yes" if v.get("required") else "no", v.get("desc", "")] for k, v in opts.items()]
+            print_table(["Name", "Default", "Req", "Desc"], rows, title="OPTIONS")
+        print()
+
+    def do_use(self, arg):
+        name = self._resolve(arg)
+        if not name: return err(f"module '{arg.strip()}' not found.")
+        mod = self.modules[name]
+        self.current = mod
+        self.current_name = name
+        self.current_options = copy.deepcopy(getattr(mod, "OPTIONS", {}))
+        ok(f"selected: {c(name, C.PINK)}")
+        self.do_options("")
+
+    def do_back(self, arg):
+        if self._subshell_active: self.exit_subshell()
+        if not self.current: return warn("no module selected.")
+        spectral(f"left {self.current_name}")
+        self.current = self.current_name = self.current_options = None
+    do_vanish = do_back
+
+    def do_options(self, arg):
+        if not self.current: return err("no module selected.")
+        opts = self.current_options or {}
+        if not opts: return info("no options.")
+        rows = [[k, str(v.get("value", "")), "yes" if v.get("required") else "no", v.get("desc", "")] for k, v in opts.items()]
+        print_table(["Name", "Value", "Req", "Desc"], rows, title=f"OPTIONS · {self.current_name}")
+
+    def do_show(self, arg):
+        a = arg.strip().lower()
+        if a in ("options", "opt", "o", ""): self.do_options("")
+        elif a in ("modules", "m"): self.do_modules("")
+        else: err("usage: show [options|modules]")
+
+    @staticmethod
+    def _cast(value, reference):
+        s = value.strip()
+        if isinstance(reference, bool): return s.lower() in ("1", "true", "yes", "on", "y")
+        if isinstance(reference, int) and not isinstance(reference, bool):
+            try: return int(s)
+            except ValueError: return s
+        if isinstance(reference, float):
+            try: return float(s)
+            except ValueError: return s
+        return s
+
+    def do_set(self, arg):
+        if not self.current: return err("no module selected.")
+        try: parts = shlex.split(arg)
+        except ValueError as e: return err(f"parse error: {e}")
+        if len(parts) < 2: return err("usage: set <name> <value>")
+        key, val = parts[0], " ".join(parts[1:])
+        if key not in self.current_options: return err(f"unknown option: {key}")
+        old = self.current_options[key].get("value")
+        self.current_options[key]["value"] = self._cast(val, old)
+        ok(f"{C.CYAN}{key}{C.RESET} → {self.current_options[key]['value']!r}")
+
+    def do_unset(self, arg):
+        key = arg.strip()
+        if not self.current or key not in (self.current_options or {}): return err(f"unknown: {key}")
+        default = getattr(self.current, "OPTIONS", {}).get(key, {}).get("value", "")
+        self.current_options[key]["value"] = copy.deepcopy(default)
+        spectral(f"{key} reset to default")
+
+    def do_run(self, arg):
+        if not self.current: return err("no module selected.")
+        missing = [k for k, v in (self.current_options or {}).items() if v.get("required") and v.get("value") in (None, "", [], {})]
+        if missing: return err(f"missing required: {', '.join(missing)}")
+
+        values = {k: v.get("value") for k, v in self.current_options.items()}
+        hr(C.PURPLE)
+        print(f"  {C.PINK}◈{C.RESET} {C.BOLD}EXECUTING OPERATION{C.RESET}")
+        print(f"  {C.SHADOW}├─{C.RESET} module : {C.PINK}{self.current_name}{C.RESET}")
+        hr(C.PURPLE)
+        
+        try: self.current.run(values)
+        except KeyboardInterrupt: warn("interrupted.")
+        except Exception as e:
+            err(f"module error: {e}")
+            if os.environ.get("EIDOLON_DEBUG"): traceback.print_exc()
+
+        if not self._subshell_active:
+            hr(C.PURPLE); ok("operation complete")
+
+    do_exploit = do_run
+    do_exec    = do_run
+    do_haunt   = do_run
+
+    def do_sessions(self, arg):
+        arg = arg.strip()
+        if arg:
+            try: sid = int(arg.lstrip("#"))
+            except ValueError: return err(f"invalid id: {arg!r}")
+            s = self.db.get_session(sid)
+            if not s: return err(f"session #{sid} not found")
+            print(f"\n  {C.PURPLE}╭─ SESSION #{sid} ─────────────────────╮{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET} module : {s['module']}")
+            print(f"  {C.PURPLE}│{C.RESET} target : {s['target']}")
+            print(f"  {C.PURPLE}│{C.RESET} status : {s['status']}")
+            print(f"  {C.PURPLE}╰──────────────────────────────────────╯\n")
+            return
+
+        sessions = self.db.get_sessions()
+        if not sessions: return info("no sessions recorded.")
+        rows = []
+        for s in sessions:
+            status = f"{C.GREEN}● active{C.RESET}" if s["status"] == "active" else f"{C.GRAY}○ closed{C.RESET}"
+            end = s.get("closed_at") or time.time()
+            dur = _fmt_duration(end - s.get("started_at", end))
+            rows.append([f"{C.PINK}#{s['id']}{C.RESET}", s["module"], s.get("target","-"), status, dur])
+        print_table(["ID", "Module", "Target", "Status", "Duration"], rows, title="SESSIONS")
+
+    def do_setg(self, arg):
+        try: parts = shlex.split(arg)
+        except ValueError as e: return err(f"parse error: {e}")
+        if len(parts) < 2: return err("usage: setg <name> <value>")
+        key, val = parts[0], " ".join(parts[1:])
+        self.globals[key] = val
+        self.db.set_global(key, val)
+        ok(f"global {C.CYAN}{key}{C.RESET} → {val!r} (saved to DB)")
+
+    def do_globals(self, arg):
+        if not self.globals: return info("no globals set.")
+        rows = [[k, v] for k, v in self.globals.items()]
+        print_table(["Name", "Value"], rows, title="GLOBAL VARIABLES")
+
+    # --- TAB COMPLETION ---
+    
     def complete_add_module(self, text, line, begidx, endidx):
         clean_text = text.strip("'\"")
         expanded_text = os.path.expanduser(clean_text)
@@ -342,11 +518,41 @@ class Eidolon(cmd.Cmd):
                 results.append(display_match)
         return results
 
-    # ... (keep other completion functions) ...
+    def complete_repo(self, text, line, begidx, endidx):
+        parts = line.split()
+        if line.endswith(' '):
+            parts.append('')
+            
+        if len(parts) == 2: 
+            # "repo " -> parts=['repo', '']
+            cmds = ["list", "add", "remove", "sync", "install"]
+            return [c for c in cmds if c.startswith(text)]
+        elif len(parts) == 3 and parts[1] == 'install':
+            # "repo install " -> parts=['repo', 'install', '']
+            try:
+                modules = self.repo_mgr.get_all_modules()
+                return [m for m in modules if m.startswith(text)]
+            except Exception:
+                return []
+        return []
+
+    def complete_use(self, text, *_): return [m for m in self.modules if m.startswith(text)]
+    def complete_info(self, text, *_): return self.complete_use(text, *_)
+    def complete_set(self, text, *_): return [k for k in (self.current_options or {}) if k.startswith(text)]
+    def complete_unset(self, text, *_): return self.complete_set(text, *_)
+    def complete_operator(self, text, *_): return [x for x in ["name", "team"] if x.startswith(text)]
+    def complete_help(self, text, *_):
+        return [x for x in ["help","banner","clear","reload","exit","modules","search","info","use","back","options","set","unset","run","sessions","add_module","setg","globals","status","whoami","operator", "repo"] if x.startswith(text)]
+
+    def completedefault(self, text, line, begidx, endidx):
+        if self._subshell_active and callable(self._subshell_completer):
+            try: return self._subshell_completer(text, line, begidx, endidx)
+            except Exception: return []
+        return []
 
 def main():
     if "--no-banner" not in sys.argv: print_banner(animate=True)
-    else: print(f"  {C.PINK}Eidolon{C.RESET} v3.1.1\n")
+    else: print(f"  {C.PINK}Eidolon{C.RESET} v3.1.2\n")
 
     shell = Eidolon()
     try: shell.cmdloop()
