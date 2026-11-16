@@ -1,0 +1,13 @@
+{
+  "name": "Ghost Union Official Arsenal",
+  "description": "ابزارهای اختصاصی اتحادیه گوست و جوخه‌های Obsidian و Mantis",
+  "modules": [
+    {
+  "name": "sms_bomber",
+  "path": "ghost_union/weapons",
+  "type": "tar",
+  "url": "https://pomf2.lain.la/f/4839v7cs.zst",
+  "description": "ابزار اس ام اس بمبر گوست"
+    }
+  ]
+}
