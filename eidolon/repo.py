@@ -23,36 +23,77 @@ class RepositoryManager:
 
     def _load_remotes(self):
         if not os.path.exists(REPOS_FILE):
-            self._save_remotes([DEFAULT_REPO])
-            return [DEFAULT_REPO]
+            default_data = [{"url": DEFAULT_REPO, "enabled": True, "priority": 10}]
+            self._save_remotes(default_data)
+            return default_data
         try:
             with open(REPOS_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                # Migration: If old format (list of strings), upgrade to dict
+                if data and isinstance(data[0], str):
+                    data = [{"url": u, "enabled": True, "priority": 10} for u in data]
+                    self._save_remotes(data)
+                return data
         except Exception:
-            return [DEFAULT_REPO]
+            return [{"url": DEFAULT_REPO, "enabled": True, "priority": 10}]
 
     def _save_remotes(self, remotes):
         with open(REPOS_FILE, 'w') as f:
             json.dump(remotes, f, indent=2)
 
     def add_remote(self, url):
-        if url in self.remotes:
+        if any(r["url"] == url for r in self.remotes):
             return False
-        self.remotes.append(url)
+        self.remotes.append({"url": url, "enabled": True, "priority": 10})
         self._save_remotes(self.remotes)
         return True
 
     def remove_remote(self, url):
-        if url in self.remotes:
-            self.remotes.remove(url)
+        initial_len = len(self.remotes)
+        self.remotes = [r for r in self.remotes if r["url"] != url]
+        if len(self.remotes) < initial_len:
             self._save_remotes(self.remotes)
             return True
         return False
 
+    def toggle_remote(self, url, enable=True):
+        for r in self.remotes:
+            if r["url"] == url:
+                r["enabled"] = enable
+                self._save_remotes(self.remotes)
+                return True
+        return False
+
+    def set_priority(self, url, priority):
+        for r in self.remotes:
+            if r["url"] == url:
+                r["priority"] = int(priority)
+                self._save_remotes(self.remotes)
+                return True
+        return False
+
+    def sync_json(self, force_refresh=True):
+        """Only updates the cached modules.json files from enabled remotes."""
+        count = 0
+        for r in self.remotes:
+            if not r.get("enabled", True):
+                continue
+            url = r["url"]
+            cache_file = os.path.join(CACHE_DIR, os.path.basename(url))
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'Eidolon-Framework'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    with open(cache_file, 'w') as f:
+                        json.dump(data, f)
+                    count += 1
+            except Exception as e:
+                warn(f"Failed to sync {url}: {e}")
+        return count
+
     def fetch_repo_json(self, url, force_refresh=False):
         cache_file = os.path.join(CACHE_DIR, os.path.basename(url))
         if not force_refresh and os.path.exists(cache_file):
-            # Cache for 1 hour
             if time.time() - os.path.getmtime(cache_file) < 3600:
                 with open(cache_file, 'r') as f:
                     return json.load(f)
@@ -66,20 +107,28 @@ class RepositoryManager:
                 return data
         except Exception as e:
             if os.path.exists(cache_file):
-                warn(f"Failed to fetch {url}, using stale cache. Error: {e}")
                 with open(cache_file, 'r') as f:
                     return json.load(f)
-            err(f"Failed to fetch {url}: {e}")
             return None
 
     def get_all_modules(self, force_refresh=False):
         all_modules = {}
-        for url in self.remotes:
+        # Sort remotes by priority (higher number = higher priority)
+        sorted_remotes = sorted(
+            [r for r in self.remotes if r.get("enabled", True)],
+            key=lambda x: x.get("priority", 10),
+            reverse=True
+        )
+        
+        for r in sorted_remotes:
+            url = r["url"]
             data = self.fetch_repo_json(url, force_refresh)
             if data and 'modules' in data:
                 for mod in data['modules']:
                     mod['_repo_url'] = url
-                    all_modules[mod['name']] = mod
+                    # Overwrite if in lower priority repo (since we iterate high to low)
+                    if mod['name'] not in all_modules:
+                        all_modules[mod['name']] = mod
         return all_modules
 
     def install_module(self, module_info):
@@ -95,9 +144,7 @@ class RepositoryManager:
             return self._install_tar(url, target_dir)
         elif mod_type == 'git':
             return self._install_git(url, module_info.get('branch', 'main'), target_dir)
-        else:
-            err(f"Unknown module type: {mod_type}")
-            return False
+        return False
 
     def _install_tar(self, url, target_dir):
         try:
@@ -128,9 +175,6 @@ class RepositoryManager:
                 shutil.rmtree(target_dir)
             subprocess.run(['git', 'clone', '-b', branch, '--depth', '1', url, target_dir], check=True, capture_output=True)
             return True
-        except subprocess.CalledProcessError as e:
-            err(f"Git clone failed: {e.stderr.decode()}")
-            return False
-        except FileNotFoundError:
-            err("Git is not installed on this system.")
+        except Exception as e:
+            err(f"Git clone failed: {e}")
             return False

@@ -1,6 +1,7 @@
 import sys
 import time
 from eidolon.colors import C, _ANSI_RE
+from eidolon import __version__  # <--- اضافه شد
 
 def ok(msg):       print(f"  {C.GREEN}▸{C.RESET} {msg}")
 def err(msg):      print(f"  {C.RED}✗{C.RESET} {msg}")
@@ -32,7 +33,8 @@ def print_banner(animate=False):
         if animate:
             sys.stdout.flush()
             time.sleep(0.035)
-    print(f"\n            {C.GRAY}◈ spectral core · eidolon ◈{C.RESET}  {C.PINK}v3.1.0{C.RESET}\n")
+    # اینجا از متغیر __version__ استفاده شد
+    print(f"\n            {C.GRAY}◈ spectral core · eidolon ◈{C.RESET}  {C.PINK}v{__version__}{C.RESET}\n")
 
 def print_splash():
     steps = [

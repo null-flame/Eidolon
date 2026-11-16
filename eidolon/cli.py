@@ -43,6 +43,12 @@ def _type_label(mod) -> str:
     t = _module_type(mod)
     return c(t, _TYPE_COLOR.get(t, "white"))
 
+def _version_tuple(v_str):
+    try:
+        return tuple(map(int, str(v_str).split('.')))
+    except Exception:
+        return (0,)
+
 class Eidolon(cmd.Cmd):
     intro = ""
     use_rawinput = True
@@ -156,9 +162,6 @@ class Eidolon(cmd.Cmd):
             if key in opts:
                 v = opts[key].get("value")
                 if v not in (None, "", False): return str(v)
-        for k, v in opts.items():
-            val = v.get("value")
-            if val not in (None, "", False): return str(val)
         return ""
 
     def enter_subshell(self, handler, completer=None, prompt_fn=None, on_exit=None):
@@ -201,82 +204,211 @@ class Eidolon(cmd.Cmd):
 
     # --- REPO COMMANDS ---
     def do_repo(self, arg):
-        """repo [list|add <url>|remove <url>|sync|install <name>]"""
+        """repo [list|search|list-modules|stats|sync|check|install|upgrade|update-all|source|info|enable|disable|priority]"""
         args = arg.strip().split()
         if not args:
             return self.do_repo("list")
         
         cmd = args[0].lower()
         
-        if cmd == "list":
+        if cmd in ("list", "remotes"):
             remotes = self.repo_mgr.remotes
-            if not remotes:
-                return warn("No remotes configured.")
-            rows = [[str(i+1), url] for i, url in enumerate(remotes)]
-            print_table(["#", "Remote URL"], rows, title="CONFIGURED REMOTES")
+            if not remotes: return warn("No remotes configured.")
+            rows = []
+            for r in remotes:
+                status = f"{C.GREEN}Enabled{C.RESET}" if r.get("enabled", True) else f"{C.RED}Disabled{C.RESET}"
+                rows.append([str(r.get("priority", 10)), status, r["url"]])
+            print_table(["Priority", "Status", "Remote URL"], rows, title="CONFIGURED REMOTES")
             
         elif cmd == "add" and len(args) > 1:
-            url = args[1]
-            if self.repo_mgr.add_remote(url):
-                ok(f"Added remote: {url}")
-            else:
-                warn("Remote already exists.")
+            if self.repo_mgr.add_remote(args[1]): ok(f"Added remote: {args[1]}")
+            else: warn("Remote already exists.")
                 
         elif cmd == "remove" and len(args) > 1:
-            url = args[1]
-            if self.repo_mgr.remove_remote(url):
-                ok(f"Removed remote: {url}")
-            else:
-                warn("Remote not found.")
+            if self.repo_mgr.remove_remote(args[1]): ok(f"Removed remote: {args[1]}")
+            else: warn("Remote not found.")
                 
+        elif cmd == "enable" and len(args) > 1:
+            if self.repo_mgr.toggle_remote(args[1], True): ok("Remote enabled.")
+            else: err("Remote not found.")
+                
+        elif cmd == "disable" and len(args) > 1:
+            if self.repo_mgr.toggle_remote(args[1], False): ok("Remote disabled.")
+            else: err("Remote not found.")
+                
+        elif cmd == "priority" and len(args) > 2:
+            try:
+                prio = int(args[2])
+                if self.repo_mgr.set_priority(args[1], prio): ok(f"Remote priority updated to {prio}.")
+                else: err("Remote not found.")
+            except ValueError: err("Priority must be a number.")
+
         elif cmd == "sync":
-            spectral("Syncing all remotes...")
-            modules = self.repo_mgr.get_all_modules(force_refresh=True)
-            ok(f"Synced {len(modules)} modules from {len(self.repo_mgr.remotes)} remotes.")
+            spectral("Syncing module JSON cache from enabled remotes...")
+            count = self.repo_mgr.sync_json(force_refresh=True)
+            ok(f"Cached metadata from {count} remotes.")
+
+        elif cmd in ("list-modules", "avail", "search"):
+            modules = self.repo_mgr.get_all_modules()
+            if not modules: return warn("No modules found.")
+                
+            if cmd == "search":
+                if len(args) < 2: return err("usage: repo search <keyword>")
+                kw = args[1].lower()
+                filtered = {}
+                for k, v in modules.items():
+                    # Search in name, desc, tags, cve
+                    search_blob = f"{k} {v.get('description', '')} {v.get('tags', '')} {v.get('cve', '')}".lower()
+                    if kw in search_blob:
+                        filtered[k] = v
+            else:
+                filtered = modules
+                
+            if not filtered: return warn("No matching modules.")
+                
+            rows = []
+            for name, minfo in sorted(filtered.items()):
+                ver = minfo.get('version', '-')
+                tags = minfo.get('tags', [])
+                tags_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
+                cve = minfo.get('cve', '')
+                
+                # Formatting metadata
+                meta = tags_str
+                if cve: meta += f" | {C.RED}{cve}{C.RESET}"
+                if not meta: meta = "-"
+
+                rows.append([f"{C.CYAN}{name}{C.RESET}", ver, minfo.get('type', 'tar'), meta[:35]])
+            print_table(["Module Name", "Version", "Type", "Tags / CVE"], rows, title="AVAILABLE MODULES")
+
+        elif cmd == "info" and len(args) > 1:
+            mod_name = args[1]
+            modules = self.repo_mgr.get_all_modules()
+            if mod_name not in modules: return err(f"Module '{mod_name}' not found in remotes.")
             
+            minfo = modules[mod_name]
+            tags = minfo.get('tags', [])
+            tags_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
+            
+            print(f"\n  {C.PURPLE}╭─ REMOTE MODULE INTEL ──────────────╮{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET} name : {C.CYAN}{mod_name}{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET} path : {minfo.get('path', mod_name)}")
+            print(f"  {C.PURPLE}│{C.RESET} type : {minfo.get('type', 'tar')} | ver: {minfo.get('version', '-')}")
+            print(f"  {C.PURPLE}│{C.RESET} desc : {minfo.get('description', '-')}")
+            if tags_str: print(f"  {C.PURPLE}│{C.RESET} tags : {C.LIME}{tags_str}{C.RESET}")
+            if minfo.get('cve'): 
+                cvss = minfo.get('cvss')
+                cvss_str = f" (CVSS: {cvss})" if cvss is not None else ""
+                print(f"  {C.PURPLE}│{C.RESET} vuln : {C.RED}{minfo.get('cve')}{cvss_str}{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET} url  : {minfo.get('url', '-')}")
+            print(f"  {C.PURPLE}╰────────────────────────────────────╯\n")
+
+        elif cmd == "stats":
+            mods = self.repo_mgr.get_all_modules()
+            cache_path = os.path.join(WORKSPACE_DIR, "cache")
+            cache_size = sum(os.path.getsize(os.path.join(cache_path, f)) for f in os.listdir(cache_path) if os.path.isfile(os.path.join(cache_path, f))) if os.path.exists(cache_path) else 0
+            print(f"\n  {C.PURPLE}╭─ REPOSITORY STATISTICS ────────────╮{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  Remotes     : {len(self.repo_mgr.remotes)}")
+            print(f"  {C.PURPLE}│{C.RESET}  Modules     : {len(mods)} available")
+            print(f"  {C.PURPLE}│{C.RESET}  Cache Size  : {cache_size / 1024:.2f} KB")
+            print(f"  {C.PURPLE}╰────────────────────────────────────╯\n")
+
+        elif cmd == "check":
+            modules = self.repo_mgr.get_all_modules()
+            updates = []
+            for name, mod in self.modules.items():
+                if name in modules:
+                    installed_ver = getattr(mod, "VERSION", "0.0.0")
+                    remote_ver = modules[name].get("version", "0.0.0")
+                    if _version_tuple(remote_ver) > _version_tuple(installed_ver):
+                        updates.append([name, installed_ver, remote_ver])
+            if not updates: ok("All installed modules are up to date.")
+            else:
+                rows = [[u[0], u[1], f"{C.GREEN}{u[2]}{C.RESET}"] for u in updates]
+                print_table(["Module", "Installed", "Available"], rows, title="UPDATES AVAILABLE")
+
         elif cmd == "install" and len(args) > 1:
             mod_name = args[1]
-            spectral(f"Searching for module '{mod_name}'...")
             modules = self.repo_mgr.get_all_modules()
-            if mod_name not in modules:
-                return err(f"Module '{mod_name}' not found in any remote.")
-            
-            mod_info = modules[mod_name]
-            spectral(f"Installing '{mod_name}' from {mod_info['_repo_url']}...")
-            if self.repo_mgr.install_module(mod_info):
-                ok(f"Module '{mod_name}' installed successfully.")
+            if mod_name not in modules: return err(f"Module '{mod_name}' not found.")
+            if self.repo_mgr.install_module(modules[mod_name]):
+                ok(f"Module '{mod_name}' installed.")
                 self.load_modules()
-            else:
-                err("Installation failed.")
-        else:
-            err("usage: repo [list|add <url>|remove <url>|sync|install <name>]")
+            else: err("Installation failed.")
 
+        elif cmd in ("upgrade", "update-all"):
+            modules = self.repo_mgr.get_all_modules()
+            to_update = []
+            if cmd == "upgrade" and len(args) > 1:
+                name = self._resolve(args[1])
+                if not name: return err("Module not found.")
+                if name in modules: to_update.append(name)
+            else:
+                for name, mod in self.modules.items():
+                    if name in modules:
+                        installed_ver = getattr(mod, "VERSION", "0.0.0")
+                        remote_ver = modules[name].get("version", "0.0.0")
+                        if _version_tuple(remote_ver) > _version_tuple(installed_ver):
+                            to_update.append(name)
+            if not to_update: return ok("Everything is up to date.")
+            for name in to_update:
+                spectral(f"Upgrading {name}...")
+                self.do_remove(name)
+                if self.repo_mgr.install_module(modules[name]): ok(f"Upgraded {name}.")
+                else: err(f"Failed to upgrade {name}.")
+            self.load_modules()
+
+        elif cmd == "source" and len(args) > 1:
+            name = self._resolve(args[1])
+            if not name: return err("Module not installed.")
+            mod = self.modules[name]
+            print(f"\n  {C.PURPLE}╭─ MODULE SOURCE ────────────────────╮{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET} Module : {name}")
+            print(f"  {C.PURPLE}│{C.RESET} Path   : {getattr(mod, '__eidolon_path__', 'Unknown')}")
+            print(f"  {C.PURPLE}╰────────────────────────────────────╯\n")
+        else:
+            err("usage: repo [list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|source|info]")
+
+    # --- MODULE MANAGEMENT ---
     def do_add_module(self, arg):
         """add_module <path> — Install a new module from a local file"""
         path = arg.strip()
-        if not path:
-            return err("usage: add_module <path_to_python_file>")
-            
+        if not path: return err("usage: add_module <path>")
         if (path.startswith('"') and path.endswith('"')) or (path.startswith("'") and path.endswith("'")):
             path = path[1:-1]
-            
         src_path = Path(os.path.expanduser(path))
-        if not src_path.is_absolute():
-            src_path = Path.cwd() / src_path
-            
-        if not src_path.exists() or not src_path.is_file():
-            return err(f"file not found: {src_path}")
-            
-        if not str(src_path).endswith(".py"):
-            return err("only .py files are allowed.")
-
+        if not src_path.is_absolute(): src_path = Path.cwd() / src_path
+        if not src_path.exists() or not src_path.is_file(): return err(f"file not found: {src_path}")
+        if not str(src_path).endswith(".py"): return err("only .py files are allowed.")
         dest_path = Path(MODULES_DIR) / src_path.name
         try:
             shutil.copy2(src_path, dest_path)
             ok(f"module copied to workspace: {dest_path.name}")
             self.load_modules()
-        except Exception as e:
-            err(f"failed to copy: {e}")
+        except Exception as e: err(f"failed to copy: {e}")
+
+    def do_remove(self, arg):
+        """remove <module_name> — Physically delete a module"""
+        name = self._resolve(arg.strip())
+        if not name: return err(f"module '{arg.strip()}' not found.")
+        mod = self.modules[name]
+        mod_path = getattr(mod, "__eidolon_path__", None)
+        if not mod_path or not os.path.exists(mod_path): return err(f"Physical file not found.")
+        abs_mod_path = os.path.abspath(mod_path)
+        abs_modules_dir = os.path.abspath(MODULES_DIR)
+        if not abs_mod_path.startswith(abs_modules_dir):
+            return err("Security violation: Attempted to delete outside modules dir.")
+        try:
+            os.remove(abs_mod_path)
+            ok(f"Removed module: {C.PINK}{name}{C.RESET}")
+            parent_dir = os.path.dirname(abs_mod_path)
+            while parent_dir != abs_modules_dir and os.path.exists(parent_dir) and not os.listdir(parent_dir):
+                os.rmdir(parent_dir)
+                parent_dir = os.path.dirname(parent_dir)
+            if self.current_name == name: self.do_back("")
+            self.load_modules()
+        except Exception as e: err(f"failed to remove module: {e}")
+    do_uninstall = do_remove
 
     def do_help(self, arg):
         """help [cmd] — show help"""
@@ -293,8 +425,8 @@ class Eidolon(cmd.Cmd):
         print(f"  {C.CYAN}help{C.RESET} / {C.CYAN}clear{C.RESET} / {C.CYAN}banner{C.RESET} / {C.CYAN}reload{C.RESET} / {C.CYAN}exit{C.RESET}")
         print(f"  {C.CYAN}modules{C.RESET} / {C.CYAN}search{C.RESET} <kw> / {C.CYAN}info{C.RESET} <name>")
         print(f"  {C.CYAN}use{C.RESET} <name> / {C.CYAN}back{C.RESET} / {C.CYAN}options{C.RESET} / {C.CYAN}set{C.RESET} <k> <v> / {C.CYAN}run{C.RESET}")
-        print(f"  {C.CYAN}repo{C.RESET} <list|add|remove|sync|install>")
-        print(f"  {C.CYAN}sessions{C.RESET} / {C.CYAN}add_module{C.RESET} <path>")
+        print(f"  {C.CYAN}repo{C.RESET} <list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|source|info>")
+        print(f"  {C.CYAN}sessions{C.RESET} / {C.CYAN}add_module{C.RESET} <path> / {C.CYAN}remove{C.RESET} <name>")
         print(f"  {C.CYAN}setg{C.RESET} <k> <v> / {C.CYAN}globals{C.RESET}\n")
 
     def do_banner(self, arg): print_banner(animate=True)
@@ -344,8 +476,9 @@ class Eidolon(cmd.Cmd):
         if not self.modules: return warn("no modules loaded.")
         rows = []
         for i, (name, m) in enumerate(sorted(self.modules.items()), 1):
-            rows.append([f"{C.PURPLE}{i:02d}{C.RESET}", f"{C.CYAN}{name}{C.RESET}", _type_label(m), getattr(m, "CATEGORY", "-"), str(getattr(m, "DESCRIPTION", "-"))[:36]])
-        print_table(["#", "Arsenal", "Type", "Category", "Description"], rows, title=f"EIDOLON ARSENAL ({len(self.modules)})")
+            ver = getattr(m, "VERSION", "0.0.0")
+            rows.append([f"{C.PURPLE}{i:02d}{C.RESET}", f"{C.CYAN}{name}{C.RESET}", ver, _type_label(m), getattr(m, "CATEGORY", "-"), str(getattr(m, "DESCRIPTION", "-"))[:30]])
+        print_table(["#", "Arsenal", "Ver", "Type", "Category", "Description"], rows, title=f"EIDOLON ARSENAL ({len(self.modules)})")
     do_list = do_ls = do_arsenal = do_modules
 
     def do_search(self, arg):
@@ -361,7 +494,7 @@ class Eidolon(cmd.Cmd):
         m = self.modules[name]
         print(f"\n  {C.PURPLE}╭─ MODULE INTEL ─────────────────────╮{C.RESET}")
         print(f"  {C.PURPLE}│{C.RESET} name: {c(name, C.WHITE)}")
-        print(f"  {C.PURPLE}│{C.RESET} type: {_type_label(m)} | cat: {getattr(m,'CATEGORY','-')}")
+        print(f"  {C.PURPLE}│{C.RESET} ver : {getattr(m, 'VERSION', '0.0.0')} | type: {_type_label(m)} | cat: {getattr(m,'CATEGORY','-')}")
         print(f"  {C.PURPLE}│{C.RESET} desc: {getattr(m,'DESCRIPTION','-')}")
         print(f"  {C.PURPLE}│{C.RESET} file: {getattr(m,'__eidolon_path__','?')}")
         print(f"  {C.PURPLE}╰────────────────────────────────────╯")
@@ -494,46 +627,42 @@ class Eidolon(cmd.Cmd):
         print_table(["Name", "Value"], rows, title="GLOBAL VARIABLES")
 
     # --- TAB COMPLETION ---
-    
     def complete_add_module(self, text, line, begidx, endidx):
         clean_text = text.strip("'\"")
         expanded_text = os.path.expanduser(clean_text)
         matches = glob.glob(expanded_text + '*')
-        
         results = []
         for match in matches:
+            basename = os.path.basename(match.rstrip('/'))
+            if basename == '__pycache__' or basename.startswith('_'): continue
             is_dir = os.path.isdir(match)
             if is_dir or match.endswith('.py'):
                 display_match = match
                 if clean_text.startswith('~'):
                     home = os.path.expanduser('~')
-                    if display_match.startswith(home):
-                        display_match = '~' + display_match[len(home):]
-                if is_dir and not display_match.endswith('/'):
-                    display_match += '/'
-                if text.startswith("'") and not display_match.startswith("'"):
-                    display_match = "'" + display_match + "'"
-                elif text.startswith('"') and not display_match.startswith('"'):
-                    display_match = '"' + display_match + '"'
+                    if display_match.startswith(home): display_match = '~' + display_match[len(home):]
+                if is_dir and not display_match.endswith('/'): display_match += '/'
+                if text.startswith("'") and not display_match.startswith("'"): display_match = "'" + display_match + "'"
+                elif text.startswith('"') and not display_match.startswith('"'): display_match = '"' + display_match + '"'
                 results.append(display_match)
         return results
 
+    def complete_remove(self, text, *_): return [m for m in self.modules if m.startswith(text)]
+    def complete_uninstall(self, text, *_): return self.complete_remove(text, *_)
+
     def complete_repo(self, text, line, begidx, endidx):
         parts = line.split()
-        if line.endswith(' '):
-            parts.append('')
+        if line.endswith(' '): parts.append('')
             
         if len(parts) == 2: 
-            # "repo " -> parts=['repo', '']
-            cmds = ["list", "add", "remove", "sync", "install"]
+            cmds = ["list", "add", "remove", "enable", "disable", "priority", "sync", "search", "list-modules", "stats", "check", "install", "upgrade", "update-all", "source", "info"]
             return [c for c in cmds if c.startswith(text)]
-        elif len(parts) == 3 and parts[1] == 'install':
-            # "repo install " -> parts=['repo', 'install', '']
-            try:
-                modules = self.repo_mgr.get_all_modules()
-                return [m for m in modules if m.startswith(text)]
-            except Exception:
-                return []
+        elif len(parts) == 3:
+            if parts[1] in ('install', 'info', 'upgrade', 'source', 'search'):
+                try: return [m for m in self.repo_mgr.get_all_modules() if m.startswith(text)]
+                except Exception: return []
+            elif parts[1] in ('enable', 'disable', 'remove', 'priority'):
+                return [r['url'] for r in self.repo_mgr.remotes if r['url'].startswith(text)]
         return []
 
     def complete_use(self, text, *_): return [m for m in self.modules if m.startswith(text)]
@@ -542,7 +671,7 @@ class Eidolon(cmd.Cmd):
     def complete_unset(self, text, *_): return self.complete_set(text, *_)
     def complete_operator(self, text, *_): return [x for x in ["name", "team"] if x.startswith(text)]
     def complete_help(self, text, *_):
-        return [x for x in ["help","banner","clear","reload","exit","modules","search","info","use","back","options","set","unset","run","sessions","add_module","setg","globals","status","whoami","operator", "repo"] if x.startswith(text)]
+        return [x for x in ["help","banner","clear","reload","exit","modules","search","info","use","back","options","set","unset","run","sessions","add_module","remove","uninstall","setg","globals","status","whoami","operator", "repo"] if x.startswith(text)]
 
     def completedefault(self, text, line, begidx, endidx):
         if self._subshell_active and callable(self._subshell_completer):
@@ -552,7 +681,7 @@ class Eidolon(cmd.Cmd):
 
 def main():
     if "--no-banner" not in sys.argv: print_banner(animate=True)
-    else: print(f"  {C.PINK}Eidolon{C.RESET} v3.1.2\n")
+    else: print(f"  {C.PINK}Eidolon{C.RESET} v3.1.5\n")
 
     shell = Eidolon()
     try: shell.cmdloop()

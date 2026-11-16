@@ -1,13 +1,14 @@
 {
   "name": "Ghost Union Official Arsenal",
-  "description": "ابزارهای اختصاصی اتحادیه گوست و جوخه‌های Obsidian و Mantis",
+  "description": "ghost tool kit(GTK)",
   "modules": [
     {
-  "name": "sms_bomber",
-  "path": "ghost_union/weapons",
-  "type": "tar",
-  "url": "https://pomf2.lain.la/f/4839v7cs.zst",
-  "description": "ابزار اس ام اس بمبر گوست"
+      "name": "sms-bomber",
+      "path": "ghost-union/weapons",
+      "type": "tar",
+      "version": "1.0.0",
+      "url": "https://pomf2.lain.la/f/4839v7cs.zst",
+      "description": "sms-bomber"
     }
   ]
 }
