@@ -7,6 +7,7 @@ import shlex
 import traceback
 import shutil
 import glob
+import getpass
 import importlib.util
 
 try:
@@ -30,7 +31,7 @@ from eidolon.loader import (
     MODULE_TYPE_EXPLOIT, MODULE_TYPE_AUXILIARY, MODULE_TYPE_GENERIC,
 )
 from eidolon.database import EidolonDB
-from eidolon.repo import RepositoryManager
+from eidolon.repo import RepositoryManager, encrypt_package
 from eidolon import __version__, CODENAME
 
 WORKSPACE_DIR = os.path.join(os.path.expanduser("~"), ".eidolon")
@@ -332,7 +333,7 @@ class Eidolon(cmd.Cmd):
     # REPO COMMANDS
     # ═════════════════════════════════════════════════════════
     def do_repo(self, arg):
-        """repo [list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|source|info]"""
+        """repo [list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|pack|source|info]"""
         args = arg.strip().split()
         if not args:
             return self.do_repo("list")
@@ -553,6 +554,31 @@ class Eidolon(cmd.Cmd):
             self.load_modules()
             return
 
+        if cmd == "pack":
+            pw = None
+            if "--password" in args:
+                i = args.index("--password")
+                if i + 1 < len(args):
+                    pw = args[i + 1]
+            positional = [a for a in args[1:] if not a.startswith("--") and a != pw]
+            if len(positional) < 2:
+                return err("usage: repo pack <src> <output.tar.zst.enc> [--password <pw>]")
+            src, outp = positional[0], positional[1]
+            if not pw:
+                pw = getpass.getpass("  package password: ")
+            if not encrypt_package(src, outp, pw):
+                return err(f"packing failed: {src}")
+            digest = sha256_of_path(outp)
+            ok(f"packed {C.CYAN}{src}{C.RESET} → {C.PINK}{outp}{C.RESET}")
+            info(f"sha256 : {C.BOLD}{digest}{C.RESET}")
+            info("index entry fields:")
+            print(f"      {C.GRAY}\"url\"      : \"<host this file>\"{C.RESET}")
+            print(f"      {C.GRAY}\"sha256\"  : \"{digest}\"{C.RESET}")
+            print(f"      {C.GRAY}\"enc\"     : true{C.RESET}")
+            warn("no password in index → install prompts for it (private module)")
+            info("add \"password\": \"…\" to the entry to ship it silently (host-obfuscation only)")
+            return
+
         if cmd == "source":
             if len(args) < 2:
                 return err("usage: repo source <name>")
@@ -573,7 +599,7 @@ class Eidolon(cmd.Cmd):
                 print(f"  {C.PURPLE}╰────────────────────────────────────╯\n")
             return
 
-        err("usage: repo [list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|source|info]")
+        err("usage: repo [list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|pack|source|info]")
 
     # ═════════════════════════════════════════════════════════
     # TOFU TRUST COMMANDS (NEW)
@@ -902,14 +928,14 @@ class Eidolon(cmd.Cmd):
         print(f"{C.PURPLE}│{C.RESET}  {C.PINK}EIDOLON{C.RESET} {C.GRAY}·{C.RESET} {C.CYAN}{CODENAME}{C.RESET} {C.GRAY}·{C.RESET} reference")
         print(f"{C.PURPLE}╰─────────────────────────────────────────╯{C.RESET}")
         print(f"  {C.CYAN}help{C.RESET} / {C.CYAN}clear{C.RESET} / {C.CYAN}banner{C.RESET} / {C.CYAN}reload{C.RESET} / {C.CYAN}exit{C.RESET}")
-        print(f"  {C.CYAN}modules{C.RESET} [--all] / {C.CYAN}search{C.RESET} <kw> / {C.CYAN}info{C.RESET} <name>")
+        print(f"  {C.CYAN}modules{C.RESET} / {C.CYAN}ls{C.RESET} [--all] / {C.CYAN}search{C.RESET} <kw> / {C.CYAN}info{C.RESET} <name>")
         print(f"  {C.CYAN}use{C.RESET} <name> / {C.CYAN}back{C.RESET} / {C.CYAN}options{C.RESET} / {C.CYAN}set{C.RESET} <k> <v> / {C.CYAN}run{C.RESET}")
         print(f"  {C.CYAN}deps{C.RESET} <name> — show module pip requirements (never auto-installed)")
         print(f"  {C.PINK}── TOFU ──{C.RESET}")
         print(f"  {C.CYAN}trust{C.RESET} <module>|--all    · {C.CYAN}untrust{C.RESET} <module>")
         print(f"  {C.CYAN}trusted{C.RESET} [--all]          · {C.CYAN}verify{C.RESET}")
         print(f"  {C.PINK}── REPO ──{C.RESET}")
-        print(f"  {C.CYAN}repo{C.RESET} <list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|source|info>")
+        print(f"  {C.CYAN}repo{C.RESET} <list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|pack|source|info>")
         print(f"  {C.PINK}── LOCAL ──{C.RESET}")
         print(f"  {C.CYAN}new_module{C.RESET} <name> [dir]      — scaffold a guided module skeleton")
         print(f"  {C.CYAN}add_module{C.RESET} <src> [dest] [--force]")
@@ -990,6 +1016,7 @@ class Eidolon(cmd.Cmd):
             title += f" · {len(self._untrusted)} untrusted"
         title += ")"
         print_table(["#", "Arsenal", "Ver", "Type", "Category", "Trust", "Description"], rows, title=title)
+    do_ls = do_modules
 
     def do_search(self, arg):
         kw = arg.strip().lower()
@@ -1289,7 +1316,7 @@ class Eidolon(cmd.Cmd):
         if len(parts) == 2:
             cmds = ["list", "add", "remove", "enable", "disable", "priority",
                     "sync", "search", "list-modules", "stats", "check",
-                    "install", "upgrade", "update-all", "source", "info"]
+                    "install", "upgrade", "update-all", "pack", "source", "info"]
             return [c for c in cmds if c.startswith(text)]
         elif len(parts) == 3:
             if parts[1] in ('install', 'info', 'upgrade', 'source', 'search'):
@@ -1306,7 +1333,7 @@ class Eidolon(cmd.Cmd):
     def complete_set(self, text, *_): return [k for k in (self.current_options or {}) if k.startswith(text)]
     def complete_unset(self, text, *_): return self.complete_set(text, *_)
     def complete_help(self, text, *_):
-        cmds = ["help","banner","clear","reload","exit","modules","search","info","use","back",
+        cmds = ["help","banner","clear","reload","exit","modules","ls","search","info","use","back",
                 "options","set","unset","run","sessions","deps","new_module","add_module","install_local","remove",
                 "setg","globals","status","repo",
                 "trust","untrust","trusted","verify"]
