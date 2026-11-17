@@ -1,9 +1,12 @@
 import sys
+import re
 import time
+import hashlib
 from eidolon.colors import C, _ANSI_RE
-from eidolon import __version__  # <--- اضافه شد
+from eidolon import __version__
 
-def ok(msg):       print(f"  {C.GREEN}▸{C.RESET} {msg}")
+
+def ok(msg):       print(f"  {C.GREEN}▪{C.RESET} {msg}")
 def err(msg):      print(f"  {C.RED}✗{C.RESET} {msg}")
 def info(msg):     print(f"  {C.CYAN}•{C.RESET} {msg}")
 def warn(msg):     print(f"  {C.YELLOW}⚠{C.RESET} {msg}")
@@ -33,7 +36,6 @@ def print_banner(animate=False):
         if animate:
             sys.stdout.flush()
             time.sleep(0.035)
-    # اینجا از متغیر __version__ استفاده شد
     print(f"\n            {C.GRAY}◈ spectral core · eidolon ◈{C.RESET}  {C.PINK}v{__version__}{C.RESET}\n")
 
 def print_splash():
@@ -48,7 +50,7 @@ def print_splash():
 
 def print_table(headers, rows, header_color=C.PINK, cell_color=C.WHITE, border_color=C.SHADOW, title=None):
     if title:
-        print(f"\n  {C.PURPLE}▌{C.RESET} {C.BOLD}{title}{C.RESET}")
+        print(f"\n  {C.PURPLE}┌{C.RESET} {C.BOLD}{title}{C.RESET}")
     widths = [len(str(h)) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
@@ -115,3 +117,62 @@ def _module_cvss(mod):
     if v is None: return None
     try: return float(v)
     except (TypeError, ValueError): return None
+
+def sha256_of_path(path: str) -> str:
+    """Compute sha256 of a file. Streaming, 1MB chunks. Raises OSError."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def sha256_of_dir(root: str) -> str:
+    """Compute deterministic sha256 of all files in a directory tree.
+    Sorted paths, ignores __pycache__, .git, and dotfiles."""
+    import os
+    h = hashlib.sha256()
+    entries = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in ("__pycache__", ".git", ".hg", ".svn") and not d.startswith("."))
+        for fn in sorted(filenames):
+            if fn.startswith("."): continue
+            fpath = os.path.join(dirpath, fn)
+            rel = os.path.relpath(fpath, root).replace(os.sep, "/")
+            entries.append((rel, fpath))
+    for rel, fpath in entries:
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            with open(fpath, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            h.update(b"<unreadable>")
+        h.update(b"\0")
+    return h.hexdigest()
+
+def version_tuple(v_str) -> tuple:
+    """
+    Robust, comparable version key.
+    Pre-releases sort before releases:
+        1.0.0-beta  <  1.0.0  <  1.0.1
+    Falls back to regex split if `packaging` unavailable or version is non-PEP440.
+    """
+    if not v_str:
+        return (0,)
+    s = str(v_str).strip()
+
+    try:
+        from packaging.version import Version
+        v = Version(s)
+        return v.release + (-1 if v.is_prerelease else 0,)
+    except Exception:
+        pass
+
+    parts = []
+    for chunk in re.split(r"[.\-+_]", s):
+        if chunk.isdigit():
+            parts.append(int(chunk))
+        else:
+            break
+    return tuple(parts + [-1]) if parts else (0,)
