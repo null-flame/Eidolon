@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/badge/python-%E2%89%A53.8-cyan?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/license-MPL--2.0-purple?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-3.1.7-pink?style=flat-square)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-3.2.1--GRIMOIRE-pink?style=flat-square)](pyproject.toml)
 [![Build](https://img.shields.io/badge/build-spectral%20core-blueviolet?style=flat-square)]()
 
 </div>

