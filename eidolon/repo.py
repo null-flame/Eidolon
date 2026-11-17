@@ -29,6 +29,9 @@ METADATA_TIMEOUT   = 15
 MAX_JSON_SIZE      = 5 * 1024 * 1024    # 5 MB  — index / metadata payloads
 MAX_ARCHIVE_SIZE   = 50 * 1024 * 1024   # 50 MB — module archives
 
+# flip to True in a future release to hard-block hashless tar installs
+ENFORCE_SHA256     = False
+
 # ─────────────────────────────────────────────────────────────
 # helpers
 # ─────────────────────────────────────────────────────────────
@@ -63,6 +66,50 @@ def _safe_extract_tar(tar: tarfile.TarFile, target: str):
 def _open_url(url: str, timeout: float):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     return urllib.request.urlopen(req, timeout=timeout)
+
+
+def encrypt_package(src_path: str, dst_path: str, password: str) -> bool:
+    """
+    Pack a module file/directory into an encrypted package: tar → zstd → AES-256
+    (pyAesCrypt format). Pairs with _decrypt_package used at install time.
+    """
+    try:
+        import pyAesCrypt
+    except ImportError:
+        err("encrypting packages requires pyAesCrypt — install it manually: pip install pyAesCrypt")
+        return False
+    src_path = os.path.abspath(src_path)
+    if not os.path.exists(src_path):
+        err(f"nothing to pack: {src_path}")
+        return False
+    tmp_tzst = dst_path + ".tmp.tar.zst"
+    try:
+        cctx = zstd.ZstdCompressor()
+        with open(tmp_tzst, "wb") as raw:
+            with cctx.stream_writer(raw) as zw:
+                with tarfile.open(fileobj=zw, mode="w|") as tar:
+                    if os.path.isdir(src_path):
+                        for root, dirs, files in os.walk(src_path):
+                            dirs[:] = sorted(d for d in dirs if not d.startswith((".", "__")))
+                            for fn in sorted(files):
+                                if fn.startswith(("_", "@")) or not fn.endswith(".py"):
+                                    continue
+                                full = os.path.join(root, fn)
+                                tar.add(full, arcname=os.path.relpath(full, src_path))
+                    else:
+                        tar.add(src_path, arcname=os.path.basename(src_path))
+        with open(tmp_tzst, "rb") as f_in, open(dst_path, "wb") as f_out:
+            pyAesCrypt.encryptStream(f_in, f_out, password, 1024 * 1024)
+        return True
+    except Exception as e:
+        err(f"packing failed: {e}")
+        return False
+    finally:
+        if os.path.exists(tmp_tzst):
+            try:
+                os.remove(tmp_tzst)
+            except OSError:
+                pass
 
 
 def _decrypt_package(src_path: str, dst_path: str, password: str) -> bool:
@@ -329,10 +376,25 @@ class RepositoryManager:
 
         os.makedirs(MODULES_DIR, exist_ok=True)
 
-        # sha256 is semi-mandatory for tar archives: warn loudly (twice) before download
+        # sha256 is semi-mandatory for tar archives: warn loudly, then require
+        # explicit double confirmation (module name + yes) before downloading
         if mod_type == "tar" and not sha:
             warn(f"SECURITY: repository index provides no sha256 for '{name}' — download cannot be verified")
             warn("SECURITY: proceeding UNVERIFIED — inspect the source before trusting this module")
+            if ENFORCE_SHA256:
+                return False, "tar install blocked: repository index provides no sha256"
+            try:
+                typed = input(f"  confirm: type the module name [{name}]: ").strip()
+            except EOFError:
+                return False, "installation aborted"
+            if typed != name:
+                return False, "installation aborted (module name mismatch)"
+            try:
+                yes = input("  confirm: type 'yes' to install UNVERIFIED: ").strip().lower()
+            except EOFError:
+                return False, "installation aborted"
+            if yes != "yes":
+                return False, "installation aborted"
 
         password = None
         if mod_type == "tar" and (module_info.get("enc") or module_info.get("encrypted")):
@@ -340,7 +402,12 @@ class RepositoryManager:
             if password:
                 spectral("package is encrypted — using password from repository index")
             else:
-                password = getpass.getpass("  package password: ")
+                try:
+                    password = getpass.getpass("  package password: ")
+                except (EOFError, KeyboardInterrupt):
+                    return False, "installation aborted (no package password)"
+                if not password:
+                    return False, "installation aborted (empty package password)"
 
         if mod_type == "tar":
             success = self._install_tar(url, target_dir, expected_sha256=sha, password=password)
