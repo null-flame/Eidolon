@@ -1,5 +1,6 @@
 import os
 import json
+import getpass
 import hashlib
 import tarfile
 import shutil
@@ -62,6 +63,32 @@ def _safe_extract_tar(tar: tarfile.TarFile, target: str):
 def _open_url(url: str, timeout: float):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _decrypt_package(src_path: str, dst_path: str, password: str) -> bool:
+    """
+    Decrypt an AES-encrypted package (pyAesCrypt format) to dst_path.
+
+    Index fields:
+      "enc": true            — package is encrypted
+      "password" / "key"     — optional: ship the password inside the index so the
+                               package host cannot tell what the file is (obfuscation
+                               only — anyone with the index can decrypt).
+                               Without it, the operator is prompted at install time —
+                               real access control for private modules.
+    """
+    try:
+        import pyAesCrypt
+    except ImportError:
+        err("encrypted package requires pyAesCrypt — install it manually: pip install pyAesCrypt")
+        return False
+    try:
+        with open(src_path, "rb") as f_in, open(dst_path, "wb") as f_out:
+            pyAesCrypt.decryptStream(f_in, f_out, password, 1024 * 1024)
+        return True
+    except Exception:
+        err("decryption failed: incorrect password or corrupted package")
+        return False
 
 
 def _safe_download(url: str, dest_path: str, max_size: int, timeout: float) -> bool:
@@ -307,8 +334,16 @@ class RepositoryManager:
             warn(f"SECURITY: repository index provides no sha256 for '{name}' — download cannot be verified")
             warn("SECURITY: proceeding UNVERIFIED — inspect the source before trusting this module")
 
+        password = None
+        if mod_type == "tar" and (module_info.get("enc") or module_info.get("encrypted")):
+            password = module_info.get("password") or module_info.get("key")
+            if password:
+                spectral("package is encrypted — using password from repository index")
+            else:
+                password = getpass.getpass("  package password: ")
+
         if mod_type == "tar":
-            success = self._install_tar(url, target_dir, expected_sha256=sha)
+            success = self._install_tar(url, target_dir, expected_sha256=sha, password=password)
         elif mod_type == "git":
             success = self._install_git(url, module_info.get("branch", "main"), target_dir)
         else:
@@ -340,12 +375,13 @@ class RepositoryManager:
                     version=module_info.get("version"),
                 )
 
-    def _install_tar(self, url: str, target_dir: str, expected_sha256: str = None) -> bool:
-        staging   = f"{target_dir}.staging-{int(time.time())}"
-        temp_file = os.path.join(
+    def _install_tar(self, url: str, target_dir: str, expected_sha256: str = None, password: str = None) -> bool:
+        staging    = f"{target_dir}.staging-{int(time.time())}"
+        temp_file  = os.path.join(
             CACHE_DIR,
             f"dl_{hashlib.sha256(url.encode()).hexdigest()[:12]}_{int(time.time())}.tar",
         )
+        plain_file = temp_file + ".plain"
         try:
             if not _safe_download(url, temp_file, MAX_ARCHIVE_SIZE, DOWNLOAD_TIMEOUT):
                 return False
@@ -356,11 +392,17 @@ class RepositoryManager:
                     err(f"SHA256 mismatch: got {actual[:16]}… expected {expected_sha256[:16]}…")
                     return False
 
+            work_file = temp_file
+            if password is not None:
+                if not _decrypt_package(temp_file, plain_file, password):
+                    return False
+                work_file = plain_file
+
             try:
-                with tarfile.open(temp_file, "r:*") as tar:
+                with tarfile.open(work_file, "r:*") as tar:
                     _safe_extract_tar(tar, staging)
             except (tarfile.TarError, OSError):
-                with open(temp_file, "rb") as fh:
+                with open(work_file, "rb") as fh:
                     dctx = zstd.ZstdDecompressor()
                     with dctx.stream_reader(fh) as reader:
                         with tarfile.open(fileobj=reader, mode="r|") as tar:
@@ -374,7 +416,7 @@ class RepositoryManager:
             err(f"Tar install failed: {e}")
             return False
         finally:
-            for p in (temp_file, staging):
+            for p in (temp_file, plain_file, staging):
                 if os.path.exists(p):
                     try:
                         if os.path.isdir(p):

@@ -7,6 +7,7 @@ import shlex
 import traceback
 import shutil
 import glob
+import importlib.util
 
 try:
     import readline
@@ -125,6 +126,17 @@ def run(opts):
 def _type_label(mod) -> str:
     t = _module_type(mod)
     return c(t, _TYPE_COLOR.get(t, "white"))
+
+
+def _missing_requirements(reqs) -> list:
+    missing = []
+    for r in reqs:
+        try:
+            if importlib.util.find_spec(str(r)) is None:
+                missing.append(str(r))
+        except (ImportError, ValueError):
+            missing.append(str(r))
+    return missing
 
 
 class Eidolon(cmd.Cmd):
@@ -439,6 +451,9 @@ class Eidolon(cmd.Cmd):
                 print(f"  {C.PURPLE}│{C.RESET} vuln : {C.RED}{m['cve']}{cvss_str}{C.RESET}")
             if m.get("sha256"):
                 print(f"  {C.PURPLE}│{C.RESET} sha  : {C.GRAY}{m['sha256'][:24]}…{C.RESET}")
+            if m.get("enc") or m.get("encrypted"):
+                enc_note = "password in index" if (m.get("password") or m.get("key")) else "password prompted at install"
+                print(f"  {C.PURPLE}│{C.RESET} enc  : {C.YELLOW}encrypted package{C.RESET} ({enc_note})")
             print(f"  {C.PURPLE}│{C.RESET} url  : {m.get('url', '-')}")
             print(f"  {C.PURPLE}╰────────────────────────────────────╯\n")
             return
@@ -457,19 +472,20 @@ class Eidolon(cmd.Cmd):
 
         if cmd == "check":
             all_remote = self.repo_mgr.get_all_modules()
-            updates = []
-            for local_name, mod in self.modules.items():
+            rows = []
+            for local_name in self.modules:
                 remote_key, remote_info = self.repo_mgr.find_by_local_name(local_name, all_remote)
                 if not remote_key:
                     continue
-                installed_ver = getattr(mod, "VERSION", "0.0.0")
-                remote_ver = remote_info.get("version", "0.0.0")
-                if version_tuple(remote_ver) > version_tuple(installed_ver):
-                    updates.append([remote_key, installed_ver, remote_ver])
-            if not updates:
-                return ok("All installed modules are up to date.")
-            rows = [[u[0], u[1], f"{C.GREEN}{u[2]}{C.RESET}"] for u in updates]
-            print_table(["Module", "Installed", "Available"], rows, title="UPDATES AVAILABLE")
+                rows.append([
+                    remote_key,
+                    getattr(self.modules[local_name], "VERSION", "-"),
+                    remote_info.get("version", "-"),
+                ])
+            if not rows:
+                return info("no installed modules have a remote source")
+            print_table(["Module", "Local VERSION", "Index version"], rows,
+                        title="REMOTE-SOURCED MODULES (index version is informational — updates are manual)")
             return
 
         if cmd == "install":
@@ -515,17 +531,13 @@ class Eidolon(cmd.Cmd):
                     return err(f"Module '{args[1]}' has no remote source.")
                 to_update.append((local_name, remote_key, remote_info))
             else:
-                for local_name, mod in self.modules.items():
+                for local_name in self.modules:
                     remote_key, remote_info = self.repo_mgr.find_by_local_name(local_name, all_remote)
-                    if not remote_key:
-                        continue
-                    installed_ver = getattr(mod, "VERSION", "0.0.0")
-                    remote_ver = remote_info.get("version", "0.0.0")
-                    if version_tuple(remote_ver) > version_tuple(installed_ver):
+                    if remote_key:
                         to_update.append((local_name, remote_key, remote_info))
-
-            if not to_update:
-                return ok("Everything is up to date.")
+                if not to_update:
+                    return ok("nothing to update — no installed module has a remote source")
+                warn(f"reinstalling {len(to_update)} module(s) from remotes (index 'version' is ignored)")
 
             for local_name, remote_key, remote_info in to_update:
                 spectral(f"Upgrading {C.CYAN}{remote_key}{C.RESET}…")
@@ -876,7 +888,6 @@ class Eidolon(cmd.Cmd):
             self.load_modules()
         except Exception as e:
             err(f"failed to remove module: {e}")
-    do_uninstall = do_remove
 
     def do_help(self, arg):
         """help [cmd] — show help"""
@@ -893,6 +904,7 @@ class Eidolon(cmd.Cmd):
         print(f"  {C.CYAN}help{C.RESET} / {C.CYAN}clear{C.RESET} / {C.CYAN}banner{C.RESET} / {C.CYAN}reload{C.RESET} / {C.CYAN}exit{C.RESET}")
         print(f"  {C.CYAN}modules{C.RESET} [--all] / {C.CYAN}search{C.RESET} <kw> / {C.CYAN}info{C.RESET} <name>")
         print(f"  {C.CYAN}use{C.RESET} <name> / {C.CYAN}back{C.RESET} / {C.CYAN}options{C.RESET} / {C.CYAN}set{C.RESET} <k> <v> / {C.CYAN}run{C.RESET}")
+        print(f"  {C.CYAN}deps{C.RESET} <name> — show module pip requirements (never auto-installed)")
         print(f"  {C.PINK}── TOFU ──{C.RESET}")
         print(f"  {C.CYAN}trust{C.RESET} <module>|--all    · {C.CYAN}untrust{C.RESET} <module>")
         print(f"  {C.CYAN}trusted{C.RESET} [--all]          · {C.CYAN}verify{C.RESET}")
@@ -931,16 +943,6 @@ class Eidolon(cmd.Cmd):
         print(f"  {C.PURPLE}│{C.RESET}  sessions  : {C.GREEN}{active}{C.RESET} active")
         print(f"  {C.PURPLE}╰────────────────────────────────────╯\n")
 
-    def do_whoami(self, arg): self.do_status("")
-
-    def do_operator(self, arg):
-        parts = arg.strip().split(maxsplit=1)
-        if not parts: return print(f"operator: {self.operator_name} @ {self.operator_team}")
-        field, value = parts[0].lower(), (parts[1].strip() if len(parts) > 1 else "")
-        if field == "name" and value: self.operator_name = value; ok("name updated")
-        elif field == "team" and value: self.operator_team = value; ok("team updated")
-        else: err("usage: operator name|team <val>")
-
     def do_exit(self, arg):
         """exit / quit — leave tool"""
         if self._subshell_active:
@@ -949,7 +951,6 @@ class Eidolon(cmd.Cmd):
         return True
 
     do_quit = do_exit
-    def do_EOF(self, arg): print(); return self.do_exit(arg)
 
     def do_modules(self, arg):
         """modules [--all] — List arsenal (default: trusted only)"""
@@ -989,7 +990,6 @@ class Eidolon(cmd.Cmd):
             title += f" · {len(self._untrusted)} untrusted"
         title += ")"
         print_table(["#", "Arsenal", "Ver", "Type", "Category", "Trust", "Description"], rows, title=title)
-    do_list = do_ls = do_arsenal = do_modules
 
     def do_search(self, arg):
         kw = arg.strip().lower()
@@ -1044,6 +1044,12 @@ class Eidolon(cmd.Cmd):
         if opts:
             rows = [[k, str(v.get("value", "")), "yes" if v.get("required") else "no", v.get("desc", "")] for k, v in opts.items()]
             print_table(["Name", "Default", "Req", "Desc"], rows, title="OPTIONS")
+        reqs = [str(r) for r in (getattr(m, "REQUIREMENTS", None) or [])]
+        if reqs:
+            missing = _missing_requirements(reqs)
+            shown = ", ".join(f"{C.RED}{r}{C.RESET}" if r in missing else r for r in reqs)
+            print(f"  {C.PURPLE}│{C.RESET} reqs : {shown}")
+            warn(f"requirements are NOT auto-installed — see: {C.PINK}deps {name}{C.RESET}")
         print()
 
     def do_use(self, arg):
@@ -1062,6 +1068,10 @@ class Eidolon(cmd.Cmd):
         self.current_name = name
         self.current_options = copy.deepcopy(getattr(mod, "OPTIONS", {}))
         ok(f"selected: {c(name, C.PINK)}")
+        reqs = getattr(mod, "REQUIREMENTS", None) or []
+        missing = _missing_requirements(reqs)
+        if missing:
+            warn(f"missing requirements: {', '.join(missing)} — see {C.PINK}deps {name}{C.RESET}")
         self.do_options("")
 
     def do_back(self, arg):
@@ -1069,7 +1079,6 @@ class Eidolon(cmd.Cmd):
         if not self.current: return warn("no module selected.")
         spectral(f"left {self.current_name}")
         self.current = self.current_name = self.current_options = None
-    do_vanish = do_back
 
     def do_options(self, arg):
         if not self.current: return err("no module selected.")
@@ -1140,9 +1149,19 @@ class Eidolon(cmd.Cmd):
         if not self._subshell_active:
             hr(C.PURPLE); ok("operation complete")
 
-    do_exploit = do_run
-    do_exec    = do_run
-    do_haunt   = do_run
+    def do_deps(self, arg):
+        """deps <module> — Show module pip requirements (printed, never installed)"""
+        name = self._resolve(arg.strip())
+        if not name or name not in self.modules:
+            return err(f"module '{arg.strip()}' not found or not loaded")
+        reqs = [str(r) for r in (getattr(self.modules[name], "REQUIREMENTS", None) or [])]
+        if not reqs:
+            return info(f"'{name}' declares no REQUIREMENTS")
+        missing = _missing_requirements(reqs)
+        rows = [[r, f"{C.RED}missing{C.RESET}" if r in missing else f"{C.GREEN}present{C.RESET}"] for r in reqs]
+        print_table(["Requirement", "Status"], rows, title=f"REQUIREMENTS · {name}")
+        warn("the framework never installs anything automatically (security)")
+        info(f"install manually: {C.BOLD}pip install {' '.join(reqs)}{C.RESET}")
 
     def do_sessions(self, arg):
         arg = arg.strip()
@@ -1253,8 +1272,6 @@ class Eidolon(cmd.Cmd):
     def complete_remove(self, text, *_):
         known = list(self.modules.keys()) + list(self._untrusted.keys())
         return [m for m in known if m.startswith(text)]
-    def complete_uninstall(self, text, *_): return self.complete_remove(text, *_)
-
     def complete_trust(self, text, *_):
         if text == "--": return ["--all"]
         return [m for m in self._untrusted if m.startswith(text)]
@@ -1288,11 +1305,10 @@ class Eidolon(cmd.Cmd):
         return [m for m in known if m.startswith(text)]
     def complete_set(self, text, *_): return [k for k in (self.current_options or {}) if k.startswith(text)]
     def complete_unset(self, text, *_): return self.complete_set(text, *_)
-    def complete_operator(self, text, *_): return [x for x in ["name", "team"] if x.startswith(text)]
     def complete_help(self, text, *_):
         cmds = ["help","banner","clear","reload","exit","modules","search","info","use","back",
-                "options","set","unset","run","sessions","new_module","add_module","install_local","remove",
-                "uninstall","setg","globals","status","whoami","operator","repo",
+                "options","set","unset","run","sessions","deps","new_module","add_module","install_local","remove",
+                "setg","globals","status","repo",
                 "trust","untrust","trusted","verify"]
         return [x for x in cmds if x.startswith(text)]
 
