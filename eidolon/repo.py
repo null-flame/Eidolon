@@ -24,6 +24,10 @@ CACHE_TTL          = 3600
 DOWNLOAD_TIMEOUT   = 60
 METADATA_TIMEOUT   = 15
 
+# anti-DoS download caps
+MAX_JSON_SIZE      = 5 * 1024 * 1024    # 5 MB  — index / metadata payloads
+MAX_ARCHIVE_SIZE   = 50 * 1024 * 1024   # 50 MB — module archives
+
 # ─────────────────────────────────────────────────────────────
 # helpers
 # ─────────────────────────────────────────────────────────────
@@ -58,6 +62,30 @@ def _safe_extract_tar(tar: tarfile.TarFile, target: str):
 def _open_url(url: str, timeout: float):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _safe_download(url: str, dest_path: str, max_size: int, timeout: float) -> bool:
+    """Stream a remote file to dest_path, refusing payloads larger than max_size."""
+    try:
+        with _open_url(url, timeout=timeout) as r, open(dest_path, "wb") as out:
+            header_len = r.headers.get("Content-Length")
+            if header_len and header_len.isdigit() and int(header_len) > max_size:
+                err(f"download aborted: exceeds size limit ({max_size // (1024 * 1024)} MB): {url}")
+                return False
+            downloaded = 0
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                downloaded += len(chunk)
+                if downloaded > max_size:
+                    err(f"download aborted: exceeded size limit mid-stream ({max_size // (1024 * 1024)} MB): {url}")
+                    return False
+                out.write(chunk)
+        return True
+    except Exception as e:
+        err(f"download failed: {url} ({e})")
+        return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -134,7 +162,10 @@ class RepositoryManager:
             return False, "URL must use HTTPS"
         try:
             with _open_url(url, timeout=METADATA_TIMEOUT) as r:
-                payload = json.loads(r.read().decode("utf-8"))
+                raw = r.read(MAX_JSON_SIZE + 1)
+            if len(raw) > MAX_JSON_SIZE:
+                return False, "index exceeds size limit"
+            payload = json.loads(raw.decode("utf-8"))
         except Exception as e:
             return False, f"unreachable or invalid JSON: {e}"
         if not isinstance(payload, dict) or "modules" not in payload:
@@ -179,7 +210,10 @@ class RepositoryManager:
                 pass
         try:
             with _open_url(url, timeout=METADATA_TIMEOUT) as r:
-                data = json.loads(r.read().decode("utf-8"))
+                raw = r.read(MAX_JSON_SIZE + 1)
+            if len(raw) > MAX_JSON_SIZE:
+                raise ValueError("index exceeds size limit")
+            data = json.loads(raw.decode("utf-8"))
             tmp = cache_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f)
@@ -255,12 +289,23 @@ class RepositoryManager:
 
         target_dir = os.path.join(MODULES_DIR, path)
 
+        # path traversal guard: resolved target must stay inside MODULES_DIR
+        real_modules = os.path.realpath(MODULES_DIR)
+        real_target  = os.path.realpath(target_dir)
+        if real_target != real_modules and not real_target.startswith(real_modules + os.sep):
+            return False, f"unsafe module path (path traversal?): {path!r}"
+
         if not force and os.path.isdir(target_dir) and any(
             not e.startswith(".") for e in os.listdir(target_dir)
         ):
             return False, f"target already populated: {path} (use --force to overwrite)"
 
         os.makedirs(MODULES_DIR, exist_ok=True)
+
+        # sha256 is semi-mandatory for tar archives: warn loudly (twice) before download
+        if mod_type == "tar" and not sha:
+            warn(f"SECURITY: repository index provides no sha256 for '{name}' — download cannot be verified")
+            warn("SECURITY: proceeding UNVERIFIED — inspect the source before trusting this module")
 
         if mod_type == "tar":
             success = self._install_tar(url, target_dir, expected_sha256=sha)
@@ -302,8 +347,8 @@ class RepositoryManager:
             f"dl_{hashlib.sha256(url.encode()).hexdigest()[:12]}_{int(time.time())}.tar",
         )
         try:
-            with _open_url(url, timeout=DOWNLOAD_TIMEOUT) as r, open(temp_file, "wb") as out:
-                shutil.copyfileobj(r, out)
+            if not _safe_download(url, temp_file, MAX_ARCHIVE_SIZE, DOWNLOAD_TIMEOUT):
+                return False
 
             if expected_sha256:
                 actual = sha256_of_path(temp_file)
@@ -347,8 +392,14 @@ class RepositoryManager:
             if os.path.exists(staging):
                 shutil.rmtree(staging, ignore_errors=True)
 
+            # only HTTPS transports — blocks ext:: and other helper transports
+            if not url.lower().startswith("https://"):
+                err("Git install failed: only HTTPS URLs are allowed")
+                return False
+
             proc = subprocess.run(
-                ["git", "clone", "-b", branch, "--depth", "1", url, staging],
+                ["git", "clone", "-b", branch, "--depth", "1",
+                 "--config", "protocol.ext.allow=never", "--", url, staging],
                 capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT,
             )
             if proc.returncode != 0:
