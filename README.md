@@ -38,9 +38,11 @@ Instead of ten scattered scripts, one place holds it all:
 
 Eidolon is built on four deliberate refusals:
 
-1. **The framework never installs anything.** Module dependencies are *displayed*
-   (`deps <name>` prints the exact `pip install` line); the operator runs it.
-   A framework that shells out to pip on your behalf is a supply-chain hazard.
+1. **The framework never installs anything.** There is no dependency system at
+   all: modules own their dependencies entirely. Most stick to the standard
+   library; anything heavier is the module's own business — the framework does
+   not track, display, or touch it. A framework that even *mentions* pip on
+   your behalf is a supply-chain hazard.
 2. **Payloads are opaque.** An exploit module is a *delivery mechanism*. What gets
    delivered — shellcode path, executable, shell command, raw source, anything else —
    comes from the operator through four social-contract channels (below). The framework
@@ -99,11 +101,10 @@ Everyday commands:
 |---|---|
 | `modules` / `ls` | list loaded modules (`--all` for every type) |
 | `search <kw>` | search local + all remote indexes |
-| `info <name>` | metadata, options, requirements |
+| `info <name>` | metadata and options |
 | `use <name>` / `back` | enter / leave a module context |
 | `set <k> <v>` / `options` | configure and inspect options |
 | `run` | execute the loaded module |
-| `deps <name>` | show the module's pip requirements — never installs |
 | `setg <k> <v>` / `globals` | workspace-wide persistent options |
 | `sessions` / `status` | session tracking and workspace state |
 
@@ -125,8 +126,6 @@ AUTHOR      = "you"
 RANK        = "normal"                 # advisory quality grade (see below)
 TARGETS     = []                       # advisory: what this applies to
 REFERENCES  = []                       # advisory: CVE ids / writeups / vendor notes
-REQUIREMENTS = ["httpx"]               # shown by `deps`, never installed
-
 OPTIONS = {
     "host": {
         "value": "",
@@ -150,8 +149,6 @@ def run(opts):
 - `MODULE_TYPE` separates the cast: `exploit` (the break-in), `post-exploit`
   (recon, escalation, and the interactive takeover via a `shell()` handler),
   `listener` + `payload` (the C2 halves), and tooling (`auxiliary`, `generic`).
-- `REQUIREMENTS` is declarative only — `deps` prints `pip install httpx`; nothing
-  is ever auto-installed.
 
 ### Advisory metadata — RANK / TARGETS / REFERENCES
 
@@ -188,6 +185,13 @@ ready to fill in — pick the type on the command line (`exploit`, `listener`,
 `payload`, `post-exploit`, `auxiliary`, `generic`) or answer the interactive
 menu; with `--fa` the scaffold and its embedded guidance are Persian. Drop any
 file straight in with `add_module <src> [dest] [--force]` or `install_local`.
+
+Every scaffold's docstring is a **zero-to-100 developer guide** for its module
+type: the contract, what the framework injects, a step-by-step recipe (for
+listeners: serve → publish → register → interact, in full; for payloads:
+profile embedding, building in any language, and the cwd-not-`/tmp` storage
+policy), the complete operator command flow, and a final checklist — in English
+or, with `--fa`, entirely in Persian.
 
 ### Payload channels (exploit modules)
 
@@ -406,11 +410,10 @@ outside the framework, exactly where their authors want them, with a completely
 free internal layout (the framework knows only the module's entry script).
 
 The framework itself now carries **zero C2 dependencies** — a WebSocket listener
-module simply declares `websockets>=11` in its `REQUIREMENTS` (displayed by
-`deps`, never auto-installed). Frame caps, chunk sizes, TLS certs, even whether a
-dropped session marks `lost` or sweeps nothing — every limit and every behavior
-is module business now; the kernel's only opinions are the registry and the
-store.
+module imports whichever protocol stack it likes and owns it completely. Frame
+caps, chunk sizes, TLS certs, even whether a dropped session marks `lost` or
+sweeps nothing — every limit and every behavior is module business now; the
+kernel's only opinions are the registry and the store.
 ------
 
 ## 🛰️ Repository System
