@@ -30,8 +30,9 @@ from eidolon.loader import (
     iter_module_files, load_module_from_path, _module_type, _cleanup_legacy_scaffolds,
     TrustManager,
     MODULE_TYPE_EXPLOIT, MODULE_TYPE_AUXILIARY, MODULE_TYPE_GENERIC,
-    MODULE_TYPE_PAYLOAD,
+    MODULE_TYPE_PAYLOAD, MODULE_TYPE_LISTENER,
 )
+from eidolon.jobs import JobManager
 from eidolon.database import EidolonDB
 from eidolon.repo import RepositoryManager, encrypt_package
 from eidolon import __version__, CODENAME
@@ -57,100 +58,64 @@ _TRUST_COLOR = {
     "unreadable": C.RED,
 }
 
-_NEW_MODULE_TEMPLATE = '''"""
-__NAME__ — Eidolon module (scaffolded by `new_module`)
-
-╔══════════════════════════════════════════════════════════════════════════╗
-║  DEVELOPER FIELD GUIDE — read once, then delete whatever you do not need  ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
+_MODULE_SCAFFOLDS = {
+    "exploit": {
+        "en": '''"""
+__NAME__ — EXPLOIT module — developer field guide
 THE CONTRACT — the framework requires exactly two names:
-  * OPTIONS  : {KEY: {"value": default, "required": bool, "desc": str}}
-               the `set KEY value` command fills these; required keys are
-               validated automatically BEFORE run() ever fires.
-  * run(opts): receives {KEY: value}. Everything else below is optional.
+  * OPTIONS   : {KEY: {"value": default, "required": bool, "desc": str}}
+                `set KEY value` fills these; required keys are validated
+                automatically BEFORE run() fires. Extra keys: "kind"
+                ("payload" = framework-managed field) and "types".
+  * run(opts) : receives {KEY: value}. Everything else optional.
 
-MODULE TYPES (MODULE_TYPE — one of):
-  auxiliary : investigation/support — scans, OSINT, fuzzing, sniffing, brute
-              force, DoS tests, parsers. Attacks nothing directly.
-  exploit   : the weapon delivery — gains initial code execution, takes a
-              payload (optional!). Gets automatic session logging in the DB.
-  payload   : the payload BUILDER — the framework ships no payload sources
-              and no compilers: THIS module owns them. Its sources sit beside
-              the script; the script builds the artifact in any language
-              (go, nim, c, rust, c#, bash, python, powershell, …) with the
-              listener profile embedded and registers it in the typed store
-              (see PAYLOAD INTEGRATION below).
-  generic   : everything else (encode/convert/package/report — non-attack helpers).
+INJECTED BY THE FRAMEWORK (inside run, zero setup):
+  opts              {KEY: value} — resolved option values
+  EIDOLON_GLOBALS   shared global dict — setg/globals; persist small state
+  EIDOLON_SHELL     the live console instance (internal API — sparingly)
+  __eidolon_path__  absolute path of this file (resolve siblings from it)
 
-METADATA the CLI displays in `info` / `modules` / remote indexes:
-  NAME, VERSION, DESCRIPTION, CATEGORY, MODULE_TYPE, AUTHOR, PAYLOAD_KIND
+DEPENDENCIES: pip names in REQUIREMENTS — DISPLAYED (`deps`), NEVER installed
+  (supply-chain safety). The operator runs:  pip install <name>
 
-PAYLOAD FREEDOM (the deepest rule of Eidolon):
-  An exploit is only a DELIVERY MECHANISM. What is delivered is yours and the
-  operator's decision — raw file, shellcode, shell one-liner, generated source,
-  multi-stage downloader, anything. The framework enforces nothing. The four
-  classic shapes below are ADVISORY PATTERNS, not a contract:
-    SHELLCODE_PATH  raw position-independent code — YOUR bug defines arch,
-                    badchars, max size: validate those in run().
-    PAYLOAD_FILE    compiled artifact dropped/uploaded on the target.
-    CMD             shell command (bash/zsh/cmd/...), e.g. piping an implant
-                    from a URL. You own the quoting and escaping.
-    PAYLOAD_SRC     source an interpreter on the target executes.
+TRUST (TOFU): fresh modules start UNTRUSTED:
+      trust <name> → use <name> → set KEY value → run
+  First run is recorded; later edits flip it to "modified" until re-trust.
 
-PAYLOAD INTEGRATION with the built-in C2 (wraith) — the dedicated field:
-  EXPLOIT side — declare one option and the framework does the bookkeeping:
+LIFECYCLE HOOKS (optional):
+  on_load()  once at load — cheap + safe only.
+  stop()     long-running modules: clean halt (sockets/loops). `kill <id>`
+             calls it; no stop() = cannot be killed.
 
-      OPTIONS = {
-          "payload": {"value": "", "required": False,
-                      "desc":  "payload name from `c2 payloads`, or a raw path",
-                      "kind":  "payload",                    # framework-managed
-                      "types": ("file-posix",)},             # accepted types
-      }
+HOUSE STYLE:
+  * speak to the operator only via eidolon.utils (ok/err/info/warn/spectral).
+  * network: explicit timeout always; report str(err) through err().
+  * filesystem: whitelists + realpath containment; never eval/exec.
+  * artifacts with real keys are written 0o600.
 
-  `set payload ghost-go` resolves LIVE against the typed store — a payload
-  whose type is outside `types` is refused on the spot. At run() the value is
-  already a manifest DICT (raw ref string never reaches you):
+EXPLOIT = DELIVERY MECHANISM. Eidolon owns the chain up to execution; you own
+everything after. Zero limits on style: memory corruption, deserialization,
+injection, auth bypass, logic bugs — the framework never judges.
 
-      def run(opts):
-          payload = opts.get("payload")            # None when unset
-          if payload:
-              artifact = payload["path"]           # ready to deliver
-              # payload["type"], ["protocol"], ["sha256"], ["name"] …
-  A raw file path always passes as type "external" — freedom stays total.
+PAYLOAD FREEDOM (the deepest rule): what is delivered is yours + operator's —
+raw file, shellcode, shell one-liner, generated source, multi-stage anything.
+The four classic shapes are ADVISORY PATTERNS, not a contract:
+  SHELLCODE_PATH  arch/badchars/max size are YOUR bug's consequences
+  PAYLOAD_FILE    compiled artifact dropped/uploaded on the target
+  CMD             shell line (bash/zsh/cmd/…) — quoting is your business
+  PAYLOAD_SRC     source an interpreter on the target executes
+Any C2 is legit: Sliver, a Wraith listener module, whatever comes next.
 
-  PAYLOAD-BUILDER side (type "payload") — build ANY language and register:
+THE DEDICATED PAYLOAD FIELD (typed store, type-checked on set):
+  `"kind": "payload"` + `"types": (...)` in OPTIONS — `set payload <ref>`
+  resolves LIVE against the store; run() receives a manifest DICT with
+  "path" inside. Raw paths pass as type "external". Under the hood:
+  eidolon.wraith.store.resolve_payload().
 
-      lsn = EIDOLON_SHELL.wraith_listener          # url / token / tags
-      # compile/produce your artifact with lsn.url + lsn.token embedded, then:
-      from wraith import store
-      store.register_payload("ghost-go", artifact, ptype="file-posix",
-                             backend="go", target_os="linux", arch="x86_64",
-                             note="compiled by ghost-implant module",
-                             protocol_tag="ws-json-async")
-  `c2 payloads` lists it; exploits pick it by name — type-filtered.
-
-INJECTED BY THE FRAMEWORK (available inside run, zero setup):
-  opts              {KEY: value} — resolved option values (strings)
-  EIDOLON_GLOBALS   shared global dict — see setg/globals; persist small state
-  EIDOLON_SHELL     the live console instance (internal API — use sparingly)
-  __eidolon_path__  absolute path of this file (resolve sibling assets from it)
-
-DEPENDENCIES: list pip names in REQUIREMENTS — they are DISPLAYED (`deps`),
-  NEVER installed by the framework (supply-chain safety). The operator runs:
-
-      pip install <name>
-
-LIFECYCLE HOOK:
-  on_load()      runs once when the module is loaded — early sanity checks,
-                  toolchain discovery, reading env; anything cheap and safe.
-
-HOUSE STYLE (helps reviewers read you):
-  * talk to the operator only through eidolon.utils: ok / err / info / warn /
-    spectral — the console owns all coloring.
-  * network I/O: ALWAYS an explicit timeout, ALWAYS str(err) through err().
-  * filesystem: whitelists, os.path.realpath containment, no eval/exec ever.
-  * payloads are written to disk with 0o600 when they contain real keys.
+INTERACTIVE SHELL AFTER BREAK-IN (optional): hand the console to your own
+  shell — EIDOLON_SHELL.enter_subshell(handler, completer=fn, prompt_fn=fn,
+  on_exit=fn). completer gives FULL TAB COMPLETION inside; exploit sessions
+  are auto-logged in the workspace DB.
 """
 
 from eidolon.utils import ok, err, info, warn, spectral
@@ -159,84 +124,1033 @@ NAME        = "__NAME__"
 VERSION     = "0.1.0"
 DESCRIPTION = "TODO: one sharp line — what breaking through this does"
 CATEGORY    = "__CATEGORY__"
-MODULE_TYPE = "__TYPE__"          # auxiliary | generic | exploit | payload
+MODULE_TYPE = "exploit"
 AUTHOR      = "__AUTHOR__"
 
-# display-only (the framework never enforces it) — classic shapes:
-# shellcode | file | cmd | code | none
-PAYLOAD_KIND = "none"
-
-# pip names only — DISPLAYED by `deps`, never auto-installed (security rule).
-REQUIREMENTS = []
-
+PAYLOAD_KIND = "file"       # display-only: shellcode | file | cmd | code | none
+REQUIREMENTS = []           # pip names — DISPLAYED by `deps`, never installed
 
 OPTIONS = {
-    # required options are validated automatically before run() fires
     "target": {
         "value":    "",
         "required": True,
         "desc":     "who this runs against (host, URL, or path)",
     },
-    # optional knobs — delete what you do not need
+    "payload": {
+        "value":    "",
+        "required": False,
+        "desc":     "payload name from `c2 payloads`, or a raw file path",
+        "kind":     "payload",            # framework-managed: validated on set
+        "types":    ("file-posix", "file-win", "shellcode", "cmd", "code"),
+    },
     "verbose": {
         "value":    False,
         "required": False,
         "desc":     "print every step",
     },
-    # dedicated payload field for exploit/payload modules — uncomment if relevant:
-    # "payload": {
-    #     "value":    "",
-    #     "required": False,
-    #     "desc":     "payload name from `c2 payloads`, or a raw file path",
-    #     "kind":     "payload",                 # framework-managed: validated
-    #     "types":    ("file-posix",),           # on set, manifest dict at run
-    # },
 }
 
 
-def on_load():
-    """Optional lifecycle hook — runs once at module load. Cheap+safe only;
-    loading must never have side effects on the target."""
-    # spectral("__NAME__ ready")
-    return None
-
-
-def _fail(msg):
-    """Uniform failure exit for modules that abort on errors mid-flight."""
-    err(msg)
-    raise SystemExit(1)
-
-
 def run(opts):
-    """THE entry point. opts = {KEY: value}; required keys already validated."""
+    """THE entry point — opts = {KEY: value}; required keys already validated."""
     target  = opts.get("target", "")
     verbose = str(opts.get("verbose", "")).lower() in ("1", "true", "yes")
 
     info(f"__NAME__: engaging {target!r}")
 
-    # ── 1. validate what the bug requires — the framework cannot know this ──
+    # -- 1. validate what YOUR bug requires (the framework cannot know) -----
     if not target:
         return err("target is empty — set it with: set target <value>")
 
-    # ── 2. (exploit/payload modules) the dedicated payload field ───────────
-    # `kind: "payload"` options arrive as a manifest DICT with "path" inside;
-    # raw file paths pass as type "external". Nothing to resolve by hand here.
-    # payload = opts.get("payload")
-    # if payload and verbose:
-    #     info(f"payload: {payload['name']} [{payload['type']}]")
+    # -- 2. the payload field arrives as a manifest DICT ----------------------
+    payload = opts.get("payload")
+    if payload:
+        artifact = payload["path"]                # ready to deliver
+        if verbose:
+            info(f"payload: {payload['name']} [{payload['type']}] at {artifact}")
+    # else: deliver by CMD / PAYLOAD_SRC / whatever this exploit dreams up —
+    # the four advisory channels in the docstring are patterns, not law.
 
-    # ── 3. the actual work — network calls carry timeouts, errors are non-fatal ──
+    # -- 3. the actual break-in -----------------------------------------------
     try:
-        # import requests
-        # resp = requests.get(f"https://{target}", timeout=10, verify=True)
-        # if verbose: print("status:", resp.status_code)
+        # your exploit here — network calls with timeout, errors non-fatal
         pass
     except Exception as e:
         return err(f"failed: {e}")
 
-    # ── 4. report ────────────────────────────────────────────────────────────
-    ok("__NAME__ finished — nothing was harmed in this scaffold")
-'''
+    # -- 4. (optional) hand the operator into your own interactive shell ------
+    # EIDOLON_SHELL.enter_subshell(self.on_line, completer=self.complete_line,
+    #                              prompt_fn=lambda: "target> ",
+    #                              on_exit=lambda: info("shell closed"))
+
+    ok("__NAME__ finished (scaffold — no real operation yet)")
+''',
+        "fa": '''"""
+__NAME__ — EXPLOIT module — developer field guide
+قرارداد — فریم‌ورک فقط دو اسم را لازم دارد:
+  * OPTIONS   : {کلید: {"value": پیش‌فرض, "required": بول, "desc": توضیح}}
+                `set کلید مقدار` این‌ها را پر می‌کند؛ کلیدهای required پیش از
+                run() خودکار اعتبارسنجی می‌شوند. کلیدهای اضافی: "kind"
+                ("payload" = فیلد اختصاصیِ مدیریت‌شده) و "types".
+  * run(opts) : مقدار {کلید: مقدار} می‌گیرد؛ بقیه اختیاری.
+
+توسط فریم‌ورک تزریق می‌شود (داخل run، بدون تنظیم):
+  opts              {کلید: مقدار} — مقادیر گزینه‌ها
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — setg/globals
+  EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول (API داخلی — کم و حساب‌شده)
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از این حل کن)
+
+وابستگی‌ها: اسم‌های pip در REQUIREMENTS — فقط «نمایش» (`deps`)، هرگز نصب
+  خودکار (امنیت زنجیره‌ی تأمین). اپراتور خودش:  pip install <name>
+
+اعتماد (TOFU): ماژول تازه UNTRUSTED است؛ جریان:
+      trust <name> ← use <name> ← set کلید مقدار ← run
+  اولین run ثبت می‌شود؛ ویرایشِ بعد از آن = "modified" تا re-trust.
+
+قلاب‌های چرخه (همه اختیاری):
+  on_load()  یک بار در لود — فقط ارزان و بی‌خطر.
+  stop()     توقف تمیز ماژول‌های طولانی‌مدت؛ `kill <id>` صدا می‌زند.
+
+شیوه‌ی خانه:
+  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn/spectral).
+  * شبکه: همیشه timeout صریح؛ گزارش خطا با err(str(err)).
+  * فایل‌سیستم: وایت‌لیست + مهار realpath؛ هرگز eval/exec.
+  * آرتیفکت حاوی کلید واقعی: با 0o600 نوشته شود.
+
+اکسپلویت فقط «وسیله‌ی تحویل» است. Eidolon زنجیره را تا لحظه‌ی اجرا مصرف
+می‌کند؛ بقیه دست توست. هیچ محدودیتی روی سبک: خرابی حافظه، تزریق، دور‌زدن
+احراز هویت، باگ منطقی — فریم‌ورک داوری نمی‌کند.
+
+آزادی پی‌لود (عمیق‌ترین قانون): آنچه تحویل می‌شود تصمیمِ تو و اپراتور است —
+فایل خام، شل‌کد، خط فرمان، سورس تولیدی، دانلودر چندمرحله‌ای. چهار مدل
+کلاسیک فقط «الگوی مشورتی»‌اند، نه قرارداد:
+  SHELLCODE_PATH  معماری/بدکاراکترها/سقف سایز برخاسته از باگِ «تو»ست
+  PAYLOAD_FILE    آرتیفکت کامپایل‌شده که روی هدف گذاشته می‌شود
+  CMD             خط شل (bash/zsh/cmd/…) — نقل‌قول‌ها با تو
+  PAYLOAD_SRC     سورسی که مفسر روی هدف اجرا می‌کند
+هر C2 مشروع است: Sliver، ماژول لیسنر Wraith، هر چیزِ فردا.
+
+فیلد اختصاصی پی‌لود (انبار تایپ‌دار، روی set اعتبارسنجی):
+  در OPTIONS اعلان کن `"kind": "payload"` + `"types": (...)`؛ `set payload`
+  همان لحظه روی انبار resolve می‌شود و run() یک مانیفست DICT با "path"
+  می‌گیرد. مسیر خام با تایپ "external" می‌گذرد. زیرش:
+  eidolon.wraith.store.resolve_payload() — مستقیم هم صداپذیر.
+
+شل تعاملی بعد از ورود (اختیاری): کنسول را به شلِ خودت بسپار —
+  EIDOLON_SHELL.enter_subshell(handler, completer=fn, prompt_fn=fn, on_exit=fn)
+completer تَب‌کامپلیت کامل می‌دهد؛ سشن اکسپلویت داخل ساب‌شل در DB لاگ می‌شود.
+"""
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one sharp line — what breaking through this does"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "exploit"
+AUTHOR      = "__AUTHOR__"
+
+PAYLOAD_KIND = "file"       # display-only: shellcode | file | cmd | code | none
+REQUIREMENTS = []           # pip names — DISPLAYED by `deps`, never installed
+
+OPTIONS = {
+    "target": {
+        "value":    "",
+        "required": True,
+        "desc":     "who this runs against (host, URL, or path)",
+    },
+    "payload": {
+        "value":    "",
+        "required": False,
+        "desc":     "payload name from `c2 payloads`, or a raw file path",
+        "kind":     "payload",            # framework-managed: validated on set
+        "types":    ("file-posix", "file-win", "shellcode", "cmd", "code"),
+    },
+    "verbose": {
+        "value":    False,
+        "required": False,
+        "desc":     "print every step",
+    },
+}
+
+
+def run(opts):
+    """THE entry point — opts = {KEY: value}; required keys already validated."""
+    target  = opts.get("target", "")
+    verbose = str(opts.get("verbose", "")).lower() in ("1", "true", "yes")
+
+    info(f"__NAME__: engaging {target!r}")
+
+    # -- 1. validate what YOUR bug requires (the framework cannot know) -----
+    if not target:
+        return err("target is empty — set it with: set target <value>")
+
+    # -- 2. the payload field arrives as a manifest DICT ----------------------
+    payload = opts.get("payload")
+    if payload:
+        artifact = payload["path"]                # ready to deliver
+        if verbose:
+            info(f"payload: {payload['name']} [{payload['type']}] at {artifact}")
+    # else: deliver by CMD / PAYLOAD_SRC / whatever this exploit dreams up —
+    # the four advisory channels in the docstring are patterns, not law.
+
+    # -- 3. the actual break-in -----------------------------------------------
+    try:
+        # your exploit here — network calls with timeout, errors non-fatal
+        pass
+    except Exception as e:
+        return err(f"failed: {e}")
+
+    # -- 4. (optional) hand the operator into your own interactive shell ------
+    # EIDOLON_SHELL.enter_subshell(self.on_line, completer=self.complete_line,
+    #                              prompt_fn=lambda: "target> ",
+    #                              on_exit=lambda: info("shell closed"))
+
+    ok("__NAME__ finished (scaffold — no real operation yet)")
+''',
+    },
+    "listener": {
+        "en": '''"""
+__NAME__ — LISTENER module — developer field guide
+THE CONTRACT — the framework requires exactly two names:
+  * OPTIONS   : {KEY: {"value": default, "required": bool, "desc": str}}
+                `set KEY value` fills these; required keys are validated
+                automatically BEFORE run() fires. Extra keys: "kind"
+                ("payload" = framework-managed field) and "types".
+  * run(opts) : receives {KEY: value}. Everything else optional.
+
+INJECTED BY THE FRAMEWORK (inside run, zero setup):
+  opts              {KEY: value} — resolved option values
+  EIDOLON_GLOBALS   shared global dict — setg/globals; persist small state
+  EIDOLON_SHELL     the live console instance (internal API — sparingly)
+  __eidolon_path__  absolute path of this file (resolve siblings from it)
+
+DEPENDENCIES: pip names in REQUIREMENTS — DISPLAYED (`deps`), NEVER installed
+  (supply-chain safety). The operator runs:  pip install <name>
+
+TRUST (TOFU): fresh modules start UNTRUSTED:
+      trust <name> → use <name> → set KEY value → run
+  First run is recorded; later edits flip it to "modified" until re-trust.
+
+LIFECYCLE HOOKS (optional):
+  on_load()  once at load — cheap + safe only.
+  stop()     long-running modules: clean halt (sockets/loops). `kill <id>`
+             calls it; no stop() = cannot be killed.
+
+HOUSE STYLE:
+  * speak to the operator only via eidolon.utils (ok/err/info/warn/spectral).
+  * network: explicit timeout always; report str(err) through err().
+  * filesystem: whitelists + realpath containment; never eval/exec.
+  * artifacts with real keys are written 0o600.
+
+A listener is 100% YOUR code: no framework listener, no transport, no wire
+contract. Choose any transport (TCP/WS/HTTP/UDP/gRPC…) and libraries; internal
+layout is FREE (siblings, _src/ with raw sources — only this entry script is
+known; dirs starting with "_" / "." stay invisible to the scanner).
+
+THE FOUR MOVES (recipes inside run() below):
+  1 SERVE    — start your server; knobs come from OPTIONS (port/host/tls…).
+  2 PROFILE  — publish: EIDOLON_SHELL.wraith_listener = <obj with .url/.token/.tags>
+  3 SESSIONS — after a handshake: eidolon.wraith.sessions.default_registry().register(...)
+               + sess.interact = self.interact + EIDOLON_SHELL._c2_on_event(("up", sess))
+  4 INTERACT — when the operator types `use <sid>` the console calls
+               sess.interact(EIDOLON_SHELL): inside you own EVERYTHING —
+               sh.enter_subshell(handler, completer=..., prompt_fn=..., on_exit=...)
+               completer = FULL TAB COMPLETION (list what YOUR payload speaks:
+               shell/upload/screenshot/…). The framework normalizes nothing.
+CLEANUP — stop() is what `kill <id>` calls; without it the job is unkiltable.
+"""
+
+import threading
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one sharp line — what this listener serves"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "listener"
+AUTHOR      = "__AUTHOR__"
+
+PAYLOAD_KIND = "none"
+REQUIREMENTS = []           # e.g. ["websockets>=11"] — DISPLAYED, never installed
+
+OPTIONS = {
+    "host": {"value": "0.0.0.0", "required": False, "desc": "bind address"},
+    "port": {"value": 0, "required": True,  "desc": "0 = auto-pick a free port"},
+    "tls":  {"value": False, "required": False, "desc": "TLS is module business"},
+}
+
+LIVE_EVENTS  = True         # "payload connected" lines in the console
+DEFAULT_TAGS = ("ws-json-async",)   # free labels — they mean only what YOU agree
+
+
+class _Profile:
+    """Published profile — any object with .url / .token / .tags works."""
+
+    def __init__(self, url, token, tags):
+        self.url, self.token, self.tags = url, token, tags
+
+
+class _Listener:
+    """Your server. Handshake -> pty -> screenshot: all agreements between
+    you and the payload. The kernel only offers the shelves used below."""
+
+    def __init__(self, host, port, tls):
+        self.host, self.port, self.tls = host, port, tls
+        self.url = f"tcp://{host}:{port}"
+        self.token = ""
+        self._sessions = {}
+
+    def start(self):
+        # TODO: start the real server (thread/asyncio — your rules).
+        # After an implant handshakes at, e.g., 10.4.2.9:51515:
+        #   from eidolon.wraith import sessions
+        #   reg   = sessions.default_registry()          # or a private one
+        #   sess  = reg.register({"sid": uuid, "implant": "my-implant",
+        #                         "os": "linux", "arch": "x86_64",
+        #                         "user": "alice", "host": "corp-ws",
+        #                         "tags": DEFAULT_TAGS}, addr)
+        #   sess.interact = self.interact                # `use <sid>` handoff
+        #   if LIVE_EVENTS: EIDOLON_SHELL._c2_on_event(("up", sess))
+        return self.url
+
+    def stop(self):
+        # TODO: close sockets / stop loops — `kill <id>` and exit call this.
+        # A listener without stop() cannot be killed.
+        pass
+
+    # ---------- the `use <sid>` handoff: ALL of this is module business ----------
+
+    def prompt_str(self):
+        return "implant > "          # show identity: f"alice@corp-ws > "
+
+    def complete_line(self, text, line):
+        # FULL TAB COMPLETION — return candidates for the operator's typing
+        return [w for w in ("shell", "upload", "download", "screenshot",
+                            "ping", "die") if w.startswith(text)]
+
+    def on_line(self, line):
+        # every inner-shell command lands here — your protocol, your rules
+        info(f"-> implant: {line!r}")
+
+    def on_leave(self):
+        info("left inner shell")
+
+    def interact(self, sh):
+        sh.enter_subshell(self.on_line, completer=self.complete_line,
+                          prompt_fn=self.prompt_str, on_exit=self.on_leave)
+
+
+def run(opts):
+    """Starts the listener. A selected listener ALWAYS becomes a managed
+    background job — `run` auto-backgrounds listener-type modules."""
+    import secrets
+    host = str(opts.get("host", "0.0.0.0"))
+    port = int(opts.get("port", 0) or 0)
+    tls  = str(opts.get("tls", "")).lower() in ("1", "true", "yes")
+
+    lsn = _Listener(host, port, tls)
+    lsn.stop()  # scaffold sanity — replace with the real serve call below
+    # url = lsn.start()
+    lsn.token = secrets.token_hex(16)
+
+    EIDOLON_SHELL.wraith_listener = _Profile(lsn.url, lsn.token, DEFAULT_TAGS)
+    info(f"__NAME__ profile: {lsn.url} · token {lsn.token[:8]}… · tags {DEFAULT_TAGS}")
+    ok("listener up — build payloads with: gen <payload module> · set · run")
+    # A listener may block (server loop) or return fast — both work here.
+''',
+        "fa": '''"""
+__NAME__ — LISTENER module — developer field guide
+قرارداد — فریم‌ورک فقط دو اسم را لازم دارد:
+  * OPTIONS   : {کلید: {"value": پیش‌فرض, "required": بول, "desc": توضیح}}
+                `set کلید مقدار` این‌ها را پر می‌کند؛ کلیدهای required پیش از
+                run() خودکار اعتبارسنجی می‌شوند. کلیدهای اضافی: "kind"
+                ("payload" = فیلد اختصاصیِ مدیریت‌شده) و "types".
+  * run(opts) : مقدار {کلید: مقدار} می‌گیرد؛ بقیه اختیاری.
+
+توسط فریم‌ورک تزریق می‌شود (داخل run، بدون تنظیم):
+  opts              {کلید: مقدار} — مقادیر گزینه‌ها
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — setg/globals
+  EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول (API داخلی — کم و حساب‌شده)
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از این حل کن)
+
+وابستگی‌ها: اسم‌های pip در REQUIREMENTS — فقط «نمایش» (`deps`)، هرگز نصب
+  خودکار (امنیت زنجیره‌ی تأمین). اپراتور خودش:  pip install <name>
+
+اعتماد (TOFU): ماژول تازه UNTRUSTED است؛ جریان:
+      trust <name> ← use <name> ← set کلید مقدار ← run
+  اولین run ثبت می‌شود؛ ویرایشِ بعد از آن = "modified" تا re-trust.
+
+قلاب‌های چرخه (همه اختیاری):
+  on_load()  یک بار در لود — فقط ارزان و بی‌خطر.
+  stop()     توقف تمیز ماژول‌های طولانی‌مدت؛ `kill <id>` صدا می‌زند.
+
+شیوه‌ی خانه:
+  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn/spectral).
+  * شبکه: همیشه timeout صریح؛ گزارش خطا با err(str(err)).
+  * فایل‌سیستم: وایت‌لیست + مهار realpath؛ هرگز eval/exec.
+  * آرتیفکت حاوی کلید واقعی: با 0o600 نوشته شود.
+
+لیسنر ۱۰۰٪ کدِ «تو»ست: بدون لیسنرِ فریم‌ورک، بدون ترنسپورت، بدون قرارداد سیم.
+هر ترنسپورت (TCP/WS/HTTP/UDP/gRPC…) و هر کتابخانه؛ چیدمان داخلی آزاد
+(هم‌پوشه‌ها، _src/ با سورس خام — فقط اسکریپت ورودی شناخته می‌شود؛ پوشه‌های
+شروع‌شده با "_" یا "." از دید اسکنر پنهان‌اند).
+
+چهار حرکت (دستورالعمل داخل run() پایین):
+  1 SERVE    — سرورت؛ تنظیمات از OPTIONS (port/host/tls…).
+  2 PROFILE  — انتشار پروفایل: EIDOLON_SHELL.wraith_listener = <شیء با .url/.token/.tags>
+  3 SESSIONS — بعد از دست‌دادن: eidolon.wraith.sessions.default_registry().register(...)
+               + sess.interact = self.interact + EIDOLON_SHELL._c2_on_event(("up", sess))
+  4 INTERACT — اپراتور `use <sid>` بزند، کنسول sess.interact(EIDOLON_SHELL)
+               را صدا می‌زند و از آن لحظه همه‌چیز دستِ توست:
+               sh.enter_subshell(handler, completer=..., prompt_fn=..., on_exit=...)
+               completer = تَب‌کامپلیت کامل (چیزهایی که پی‌لودِ «تو» می‌فهمد
+               فهرست کن: shell/upload/screenshot/…). فریم‌ورک هیچ چیز درون را
+               عادی‌سازی نمی‌کند.
+پاک‌سازی — stop() همان چیزی است که `kill <id>` صدا می‌زند.
+"""
+
+import threading
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one sharp line — what this listener serves"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "listener"
+AUTHOR      = "__AUTHOR__"
+
+PAYLOAD_KIND = "none"
+REQUIREMENTS = []           # e.g. ["websockets>=11"] — DISPLAYED, never installed
+
+OPTIONS = {
+    "host": {"value": "0.0.0.0", "required": False, "desc": "bind address"},
+    "port": {"value": 0, "required": True,  "desc": "0 = auto-pick a free port"},
+    "tls":  {"value": False, "required": False, "desc": "TLS is module business"},
+}
+
+LIVE_EVENTS  = True         # "payload connected" lines in the console
+DEFAULT_TAGS = ("ws-json-async",)   # free labels — they mean only what YOU agree
+
+
+class _Profile:
+    """Published profile — any object with .url / .token / .tags works."""
+
+    def __init__(self, url, token, tags):
+        self.url, self.token, self.tags = url, token, tags
+
+
+class _Listener:
+    """Your server. Handshake -> pty -> screenshot: all agreements between
+    you and the payload. The kernel only offers the shelves used below."""
+
+    def __init__(self, host, port, tls):
+        self.host, self.port, self.tls = host, port, tls
+        self.url = f"tcp://{host}:{port}"
+        self.token = ""
+        self._sessions = {}
+
+    def start(self):
+        # TODO: start the real server (thread/asyncio — your rules).
+        # After an implant handshakes at, e.g., 10.4.2.9:51515:
+        #   from eidolon.wraith import sessions
+        #   reg   = sessions.default_registry()          # or a private one
+        #   sess  = reg.register({"sid": uuid, "implant": "my-implant",
+        #                         "os": "linux", "arch": "x86_64",
+        #                         "user": "alice", "host": "corp-ws",
+        #                         "tags": DEFAULT_TAGS}, addr)
+        #   sess.interact = self.interact                # `use <sid>` handoff
+        #   if LIVE_EVENTS: EIDOLON_SHELL._c2_on_event(("up", sess))
+        return self.url
+
+    def stop(self):
+        # TODO: close sockets / stop loops — `kill <id>` and exit call this.
+        # A listener without stop() cannot be killed.
+        pass
+
+    # ---------- the `use <sid>` handoff: ALL of this is module business ----------
+
+    def prompt_str(self):
+        return "implant > "          # show identity: f"alice@corp-ws > "
+
+    def complete_line(self, text, line):
+        # FULL TAB COMPLETION — return candidates for the operator's typing
+        return [w for w in ("shell", "upload", "download", "screenshot",
+                            "ping", "die") if w.startswith(text)]
+
+    def on_line(self, line):
+        # every inner-shell command lands here — your protocol, your rules
+        info(f"-> implant: {line!r}")
+
+    def on_leave(self):
+        info("left inner shell")
+
+    def interact(self, sh):
+        sh.enter_subshell(self.on_line, completer=self.complete_line,
+                          prompt_fn=self.prompt_str, on_exit=self.on_leave)
+
+
+def run(opts):
+    """Starts the listener. A selected listener ALWAYS becomes a managed
+    background job — `run` auto-backgrounds listener-type modules."""
+    import secrets
+    host = str(opts.get("host", "0.0.0.0"))
+    port = int(opts.get("port", 0) or 0)
+    tls  = str(opts.get("tls", "")).lower() in ("1", "true", "yes")
+
+    lsn = _Listener(host, port, tls)
+    lsn.stop()  # scaffold sanity — replace with the real serve call below
+    # url = lsn.start()
+    lsn.token = secrets.token_hex(16)
+
+    EIDOLON_SHELL.wraith_listener = _Profile(lsn.url, lsn.token, DEFAULT_TAGS)
+    info(f"__NAME__ profile: {lsn.url} · token {lsn.token[:8]}… · tags {DEFAULT_TAGS}")
+    ok("listener up — build payloads with: gen <payload module> · set · run")
+    # A listener may block (server loop) or return fast — both work here.
+''',
+    },
+    "payload": {
+        "en": r'''"""
+__NAME__ — PAYLOAD BUILDER module — developer field guide
+THE CONTRACT — the framework requires exactly two names:
+  * OPTIONS   : {KEY: {"value": default, "required": bool, "desc": str}}
+                `set KEY value` fills these; required keys are validated
+                automatically BEFORE run() fires. Extra keys: "kind"
+                ("payload" = framework-managed field) and "types".
+  * run(opts) : receives {KEY: value}. Everything else optional.
+
+INJECTED BY THE FRAMEWORK (inside run, zero setup):
+  opts              {KEY: value} — resolved option values
+  EIDOLON_GLOBALS   shared global dict — setg/globals; persist small state
+  EIDOLON_SHELL     the live console instance (internal API — sparingly)
+  __eidolon_path__  absolute path of this file (resolve siblings from it)
+
+DEPENDENCIES: pip names in REQUIREMENTS — DISPLAYED (`deps`), NEVER installed
+  (supply-chain safety). The operator runs:  pip install <name>
+
+TRUST (TOFU): fresh modules start UNTRUSTED:
+      trust <name> → use <name> → set KEY value → run
+  First run is recorded; later edits flip it to "modified" until re-trust.
+
+LIFECYCLE HOOKS (optional):
+  on_load()  once at load — cheap + safe only.
+  stop()     long-running modules: clean halt (sockets/loops). `kill <id>`
+             calls it; no stop() = cannot be killed.
+
+HOUSE STYLE:
+  * speak to the operator only via eidolon.utils (ok/err/info/warn/spectral).
+  * network: explicit timeout always; report str(err) through err().
+  * filesystem: whitelists + realpath containment; never eval/exec.
+  * artifacts with real keys are written 0o600.
+
+The framework ships ZERO payload sources and ZERO compilers: THIS module is
+the builder. Produce the implant in ANY language (go/nim/c/rust/c#/bash/
+python/PowerShell…) — entry script is Python, output is yours. Layout is
+free (_src/, assets/, …; resolve from __eidolon_path__).
+
+THE BUILD (inside run(opts)):
+  1. operator params arrive in opts (name, target_os, arch, format …)
+  2. listener profile: lsn = EIDOLON_SHELL.wraith_listener (.url/.token/.tags)
+     — embed it so the implant knows where to phone home.
+  3. read raw sources, substitute the profile, compile however you like.
+  4. REGISTER: eidolon.wraith.store.register_payload(name, artifact, ptype=…,
+     backend=…, target_os=…, arch=…, protocol_tag=… — a free metadata label)
+  `run` then reports "registered payload: <name> — <summary>" automatically.
+
+STORE TYPES: file-posix / file-win / shellcode / cmd / code (+ raw paths =
+"external"). Exploits declare "kind": "payload" + "types" — mismatched
+payloads are REFUSED at set, never silently mixed.
+"""
+
+import os
+import secrets
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one sharp line — what this builder produces"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "payload"
+AUTHOR      = "__AUTHOR__"
+
+PAYLOAD_KIND = "code"
+REQUIREMENTS = []
+
+OPTIONS = {
+    "name":        {"value": "", "required": True,
+                    "desc":  "store name for the built artifact"},
+    "target_os":   {"value": "linux",  "required": False, "desc": "target OS"},
+    "target_arch": {"value": "x86_64", "required": False, "desc": "target arch"},
+}
+
+_TEMPLATE = (
+    "#!/bin/sh\n"
+    "# TODO: replace with REAL sources in _src/ (go / nim / c / rust / c# …)\n"
+    "# this placeholder simply proves the builder->store->exploit pipeline\n"
+    "echo \"implant placeholder — profile: {URL} token:{TOKEN}\"\n"
+)
+
+
+def run(opts):
+    """Build in ANY language; then register so exploits can pick it up."""
+    name   = str(opts.get("name", "")).strip()
+    target = str(opts.get("target_os", "linux"))
+    arch   = str(opts.get("target_arch", "x86_64"))
+    if not name:
+        return err("set a store name first: set name my-implant")
+
+    # -- 1. the listener profile to embed -------------------------------------
+    lsn = EIDOLON_SHELL.wraith_listener
+    if not lsn:
+        return err("no listener up — use <listener module> · set port · run")
+    info(f"embedding: {lsn.url} · token {str(lsn.token)[:8]}… · {lsn.tags}")
+
+    # -- 2. produce the artifact (substitute the profile into raw sources) ----
+    # real builders: read _src/<anything> next to __eidolon_path__, compile
+    # via subprocess (go build / nim c / csc / …) — however you please.
+    code = _TEMPLATE.replace("{URL}", str(lsn.url)).replace("{TOKEN}", str(lsn.token))
+    out  = "/tmp/" + name + ".sh"
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(code)
+    os.chmod(out, 0o600)
+
+    # -- 3. REGISTER — this is what puts it on the operator's radar -----------
+    from eidolon.wraith import store
+    manifest = store.register_payload(
+        name, out, ptype="file-posix", backend="sh", target_os=target,
+        arch=arch, note="built by __NAME__ scaffold",
+        protocol_tag="ws-json-async")            # optional free metadata
+    ok(f"built + registered: {store.summary(manifest)} -> {store.artifact_path(manifest)}")
+''',
+        "fa": r'''"""
+__NAME__ — PAYLOAD BUILDER module — developer field guide
+قرارداد — فریم‌ورک فقط دو اسم را لازم دارد:
+  * OPTIONS   : {کلید: {"value": پیش‌فرض, "required": بول, "desc": توضیح}}
+                `set کلید مقدار` این‌ها را پر می‌کند؛ کلیدهای required پیش از
+                run() خودکار اعتبارسنجی می‌شوند. کلیدهای اضافی: "kind"
+                ("payload" = فیلد اختصاصیِ مدیریت‌شده) و "types".
+  * run(opts) : مقدار {کلید: مقدار} می‌گیرد؛ بقیه اختیاری.
+
+توسط فریم‌ورک تزریق می‌شود (داخل run، بدون تنظیم):
+  opts              {کلید: مقدار} — مقادیر گزینه‌ها
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — setg/globals
+  EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول (API داخلی — کم و حساب‌شده)
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از این حل کن)
+
+وابستگی‌ها: اسم‌های pip در REQUIREMENTS — فقط «نمایش» (`deps`)، هرگز نصب
+  خودکار (امنیت زنجیره‌ی تأمین). اپراتور خودش:  pip install <name>
+
+اعتماد (TOFU): ماژول تازه UNTRUSTED است؛ جریان:
+      trust <name> ← use <name> ← set کلید مقدار ← run
+  اولین run ثبت می‌شود؛ ویرایشِ بعد از آن = "modified" تا re-trust.
+
+قلاب‌های چرخه (همه اختیاری):
+  on_load()  یک بار در لود — فقط ارزان و بی‌خطر.
+  stop()     توقف تمیز ماژول‌های طولانی‌مدت؛ `kill <id>` صدا می‌زند.
+
+شیوه‌ی خانه:
+  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn/spectral).
+  * شبکه: همیشه timeout صریح؛ گزارش خطا با err(str(err)).
+  * فایل‌سیستم: وایت‌لیست + مهار realpath؛ هرگز eval/exec.
+  * آرتیفکت حاوی کلید واقعی: با 0o600 نوشته شود.
+
+فریم‌ورک صفر سورس پی‌لود و صفر کامپایلر دارد: «این ماژول» بیلدر است. ایمپلنت
+را به هر زبانی بساز (go/nim/c/rust/c#/bash/python/PowerShell…)؛ اسکریپت ورودی
+پایتون است، خروجی هر چه می‌خواهی. چیدمان آزاد (_src/، assets/… از
+__eidolon_path__ حل کن).
+
+قطعه‌ی ساخت (داخل run(opts)):
+  1. پارامترهای اپراتور در opts (name, target_os, arch, format …)
+  2. پروفایل لیسنر: lsn = EIDOLON_SHELL.wraith_listener (.url/.token/.tags)
+     — امبدش کن تا ایمپلنت بداند کجا زنگ بزند.
+  3. سورس خام را بخوان، پروفایل را جانشین کن، هرطور خواستی کامپایل کن.
+  4. ثبت: eidolon.wraith.store.register_payload(name, artifact, ptype=…, backend=…,
+     target_os=…, arch=…, protocol_tag=… — فراداده‌ی آزاد)
+  بعد از run خودش گزارش می‌دهد: "registered payload: <name> — <خلاصه>".
+
+تایپ‌های انبار: file-posix / file-win / shellcode / cmd / code (+ مسیر خام =
+"external"). اکسپلویت‌ها "kind": "payload" + "types" اعلان می‌کنند؛ ناهمخوان
+روی set رد می‌شود — اشتباه ممکن نیست.
+"""
+
+import os
+import secrets
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one sharp line — what this builder produces"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "payload"
+AUTHOR      = "__AUTHOR__"
+
+PAYLOAD_KIND = "code"
+REQUIREMENTS = []
+
+OPTIONS = {
+    "name":        {"value": "", "required": True,
+                    "desc":  "store name for the built artifact"},
+    "target_os":   {"value": "linux",  "required": False, "desc": "target OS"},
+    "target_arch": {"value": "x86_64", "required": False, "desc": "target arch"},
+}
+
+_TEMPLATE = (
+    "#!/bin/sh\n"
+    "# TODO: replace with REAL sources in _src/ (go / nim / c / rust / c# …)\n"
+    "# this placeholder simply proves the builder->store->exploit pipeline\n"
+    "echo \"implant placeholder — profile: {URL} token:{TOKEN}\"\n"
+)
+
+
+def run(opts):
+    """Build in ANY language; then register so exploits can pick it up."""
+    name   = str(opts.get("name", "")).strip()
+    target = str(opts.get("target_os", "linux"))
+    arch   = str(opts.get("target_arch", "x86_64"))
+    if not name:
+        return err("set a store name first: set name my-implant")
+
+    # -- 1. the listener profile to embed -------------------------------------
+    lsn = EIDOLON_SHELL.wraith_listener
+    if not lsn:
+        return err("no listener up — use <listener module> · set port · run")
+    info(f"embedding: {lsn.url} · token {str(lsn.token)[:8]}… · {lsn.tags}")
+
+    # -- 2. produce the artifact (substitute the profile into raw sources) ----
+    # real builders: read _src/<anything> next to __eidolon_path__, compile
+    # via subprocess (go build / nim c / csc / …) — however you please.
+    code = _TEMPLATE.replace("{URL}", str(lsn.url)).replace("{TOKEN}", str(lsn.token))
+    out  = "/tmp/" + name + ".sh"
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(code)
+    os.chmod(out, 0o600)
+
+    # -- 3. REGISTER — this is what puts it on the operator's radar -----------
+    from eidolon.wraith import store
+    manifest = store.register_payload(
+        name, out, ptype="file-posix", backend="sh", target_os=target,
+        arch=arch, note="built by __NAME__ scaffold",
+        protocol_tag="ws-json-async")            # optional free metadata
+    ok(f"built + registered: {store.summary(manifest)} -> {store.artifact_path(manifest)}")
+''',
+    },
+    "auxiliary": {
+        "en": r'''"""
+__NAME__ — AUXILIARY module — developer field guide
+THE CONTRACT — the framework requires exactly two names:
+  * OPTIONS   : {KEY: {"value": default, "required": bool, "desc": str}}
+                `set KEY value` fills these; required keys are validated
+                automatically BEFORE run() fires. Extra keys: "kind"
+                ("payload" = framework-managed field) and "types".
+  * run(opts) : receives {KEY: value}. Everything else optional.
+
+INJECTED BY THE FRAMEWORK (inside run, zero setup):
+  opts              {KEY: value} — resolved option values
+  EIDOLON_GLOBALS   shared global dict — setg/globals; persist small state
+  EIDOLON_SHELL     the live console instance (internal API — sparingly)
+  __eidolon_path__  absolute path of this file (resolve siblings from it)
+
+DEPENDENCIES: pip names in REQUIREMENTS — DISPLAYED (`deps`), NEVER installed
+  (supply-chain safety). The operator runs:  pip install <name>
+
+TRUST (TOFU): fresh modules start UNTRUSTED:
+      trust <name> → use <name> → set KEY value → run
+  First run is recorded; later edits flip it to "modified" until re-trust.
+
+LIFECYCLE HOOKS (optional):
+  on_load()  once at load — cheap + safe only.
+  stop()     long-running modules: clean halt (sockets/loops). `kill <id>`
+             calls it; no stop() = cannot be killed.
+
+HOUSE STYLE:
+  * speak to the operator only via eidolon.utils (ok/err/info/warn/spectral).
+  * network: explicit timeout always; report str(err) through err().
+  * filesystem: whitelists + realpath containment; never eval/exec.
+  * artifacts with real keys are written 0o600.
+
+AUXILIARY = investigation and support. Attacks nothing directly. The whole
+spectrum is open: port scans, service fingerprints, OSINT, DNS recon, fuzz
+harnesses, sniffers, brute-force helpers, parsers, report writers — anything
+that makes the exploit layer smarter.
+"""
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one sharp line — what this auxiliary module does"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "auxiliary"
+AUTHOR      = "__AUTHOR__"
+
+PAYLOAD_KIND = "none"
+REQUIREMENTS = []
+
+OPTIONS = {
+    "target": {"value": "", "required": True,
+               "desc":  "host / file / keyword this inspection runs on"},
+    "active": {"value": False, "required": False,
+               "desc":  "touch the target (packets/requests) — off = passive"},
+    "output": {"value": "", "required": False,
+               "desc":  "write the findings here (empty = console only)"},
+}
+
+
+def run(opts):
+    target = str(opts.get("target", "")).strip()
+    if not target:
+        return err("set it: set target <value>")
+
+    info(f"__NAME__: inspecting {target!r}")
+    findings = []
+
+    # -- the inspection: scans / OSINT / fuzz / parse / brute / etc ----------
+    try:
+        pass        # your capability here
+    except Exception as e:
+        return err(f"failed: {e}")
+
+    out = str(opts.get("output", "")).strip()
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("\n".join(map(str, findings)))
+        ok(f"{len(findings)} finding(s) → {out}")
+    else:
+        for row in findings:
+            print("   ", row)
+    ok("__NAME__ finished (scaffold — passive by default)")
+''',
+        "fa": r'''"""
+__NAME__ — AUXILIARY module — developer field guide
+قرارداد — فریم‌ورک فقط دو اسم را لازم دارد:
+  * OPTIONS   : {کلید: {"value": پیش‌فرض, "required": بول, "desc": توضیح}}
+                `set کلید مقدار` این‌ها را پر می‌کند؛ کلیدهای required پیش از
+                run() خودکار اعتبارسنجی می‌شوند. کلیدهای اضافی: "kind"
+                ("payload" = فیلد اختصاصیِ مدیریت‌شده) و "types".
+  * run(opts) : مقدار {کلید: مقدار} می‌گیرد؛ بقیه اختیاری.
+
+توسط فریم‌ورک تزریق می‌شود (داخل run، بدون تنظیم):
+  opts              {کلید: مقدار} — مقادیر گزینه‌ها
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — setg/globals
+  EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول (API داخلی — کم و حساب‌شده)
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از این حل کن)
+
+وابستگی‌ها: اسم‌های pip در REQUIREMENTS — فقط «نمایش» (`deps`)، هرگز نصب
+  خودکار (امنیت زنجیره‌ی تأمین). اپراتور خودش:  pip install <name>
+
+اعتماد (TOFU): ماژول تازه UNTRUSTED است؛ جریان:
+      trust <name> ← use <name> ← set کلید مقدار ← run
+  اولین run ثبت می‌شود؛ ویرایشِ بعد از آن = "modified" تا re-trust.
+
+قلاب‌های چرخه (همه اختیاری):
+  on_load()  یک بار در لود — فقط ارزان و بی‌خطر.
+  stop()     توقف تمیز ماژول‌های طولانی‌مدت؛ `kill <id>` صدا می‌زند.
+
+شیوه‌ی خانه:
+  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn/spectral).
+  * شبکه: همیشه timeout صریح؛ گزارش خطا با err(str(err)).
+  * فایل‌سیستم: وایت‌لیست + مهار realpath؛ هرگز eval/exec.
+  * آرتیفکت حاوی کلید واقعی: با 0o600 نوشته شود.
+
+auxiliary = پژوهش و پشتیبانی. مستقیم حمله نمی‌کند. کل طیف باز است: اسکن پورت،
+اثر انگشت سرویس، OSINT، ریکان DNS، فازر، اسنیفر، هارنس brute-force، پارسر،
+گزارش‌نویس — هرچه لایه‌ی اکسپلویت را باهوش‌تر کند.
+"""
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one sharp line — what this auxiliary module does"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "auxiliary"
+AUTHOR      = "__AUTHOR__"
+
+PAYLOAD_KIND = "none"
+REQUIREMENTS = []
+
+OPTIONS = {
+    "target": {"value": "", "required": True,
+               "desc":  "host / file / keyword this inspection runs on"},
+    "active": {"value": False, "required": False,
+               "desc":  "touch the target (packets/requests) — off = passive"},
+    "output": {"value": "", "required": False,
+               "desc":  "write the findings here (empty = console only)"},
+}
+
+
+def run(opts):
+    target = str(opts.get("target", "")).strip()
+    if not target:
+        return err("set it: set target <value>")
+
+    info(f"__NAME__: inspecting {target!r}")
+    findings = []
+
+    # -- the inspection: scans / OSINT / fuzz / parse / brute / etc ----------
+    try:
+        pass        # your capability here
+    except Exception as e:
+        return err(f"failed: {e}")
+
+    out = str(opts.get("output", "")).strip()
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("\n".join(map(str, findings)))
+        ok(f"{len(findings)} finding(s) → {out}")
+    else:
+        for row in findings:
+            print("   ", row)
+    ok("__NAME__ finished (scaffold — passive by default)")
+''',
+    },
+    "generic": {
+        "en": '''"""
+__NAME__ — GENERIC module — developer field guide
+THE CONTRACT — the framework requires exactly two names:
+  * OPTIONS   : {KEY: {"value": default, "required": bool, "desc": str}}
+                `set KEY value` fills these; required keys are validated
+                automatically BEFORE run() fires. Extra keys: "kind"
+                ("payload" = framework-managed field) and "types".
+  * run(opts) : receives {KEY: value}. Everything else optional.
+
+INJECTED BY THE FRAMEWORK (inside run, zero setup):
+  opts              {KEY: value} — resolved option values
+  EIDOLON_GLOBALS   shared global dict — setg/globals; persist small state
+  EIDOLON_SHELL     the live console instance (internal API — sparingly)
+  __eidolon_path__  absolute path of this file (resolve siblings from it)
+
+DEPENDENCIES: pip names in REQUIREMENTS — DISPLAYED (`deps`), NEVER installed
+  (supply-chain safety). The operator runs:  pip install <name>
+
+TRUST (TOFU): fresh modules start UNTRUSTED:
+      trust <name> → use <name> → set KEY value → run
+  First run is recorded; later edits flip it to "modified" until re-trust.
+
+LIFECYCLE HOOKS (optional):
+  on_load()  once at load — cheap + safe only.
+  stop()     long-running modules: clean halt (sockets/loops). `kill <id>`
+             calls it; no stop() = cannot be killed.
+
+HOUSE STYLE:
+  * speak to the operator only via eidolon.utils (ok/err/info/warn/spectral).
+  * network: explicit timeout always; report str(err) through err().
+  * filesystem: whitelists + realpath containment; never eval/exec.
+  * artifacts with real keys are written 0o600.
+
+GENERIC = neither attack nor investigation: encoders/decoders, converters,
+packagers, report generators, payload transformers (any language in →
+anything out), automation glue.
+"""
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one sharp line — what this converts / packages / reports"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "generic"
+AUTHOR      = "__AUTHOR__"
+
+PAYLOAD_KIND = "none"
+REQUIREMENTS = []
+
+OPTIONS = {
+    "input":  {"value": "", "required": True,  "desc": "input (file, string …)"},
+    "output": {"value": "", "required": False, "desc": "write result here (empty = print)"},
+}
+
+
+def run(opts):
+    src = str(opts.get("input", "")).strip()
+    if not src:
+        return err("set it: set input <value>")
+    info(f"__NAME__: working on {src!r}")
+    result = "TODO: transform here"
+
+    out = str(opts.get("output", "")).strip()
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(str(result))
+        ok(f"result → {out}")
+    else:
+        ok(f"result: {result}")
+''',
+        "fa": '''"""
+__NAME__ — GENERIC module — developer field guide
+قرارداد — فریم‌ورک فقط دو اسم را لازم دارد:
+  * OPTIONS   : {کلید: {"value": پیش‌فرض, "required": بول, "desc": توضیح}}
+                `set کلید مقدار` این‌ها را پر می‌کند؛ کلیدهای required پیش از
+                run() خودکار اعتبارسنجی می‌شوند. کلیدهای اضافی: "kind"
+                ("payload" = فیلد اختصاصیِ مدیریت‌شده) و "types".
+  * run(opts) : مقدار {کلید: مقدار} می‌گیرد؛ بقیه اختیاری.
+
+توسط فریم‌ورک تزریق می‌شود (داخل run، بدون تنظیم):
+  opts              {کلید: مقدار} — مقادیر گزینه‌ها
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — setg/globals
+  EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول (API داخلی — کم و حساب‌شده)
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از این حل کن)
+
+وابستگی‌ها: اسم‌های pip در REQUIREMENTS — فقط «نمایش» (`deps`)، هرگز نصب
+  خودکار (امنیت زنجیره‌ی تأمین). اپراتور خودش:  pip install <name>
+
+اعتماد (TOFU): ماژول تازه UNTRUSTED است؛ جریان:
+      trust <name> ← use <name> ← set کلید مقدار ← run
+  اولین run ثبت می‌شود؛ ویرایشِ بعد از آن = "modified" تا re-trust.
+
+قلاب‌های چرخه (همه اختیاری):
+  on_load()  یک بار در لود — فقط ارزان و بی‌خطر.
+  stop()     توقف تمیز ماژول‌های طولانی‌مدت؛ `kill <id>` صدا می‌زند.
+
+شیوه‌ی خانه:
+  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn/spectral).
+  * شبکه: همیشه timeout صریح؛ گزارش خطا با err(str(err)).
+  * فایل‌سیستم: وایت‌لیست + مهار realpath؛ هرگز eval/exec.
+  * آرتیفکت حاوی کلید واقعی: با 0o600 نوشته شود.
+
+generic = نه حمله، نه پژوهش: انکودر/دیکودر، تبدیل‌کننده، پکیجر، تولیدکننده
+گزارش، ترنسفورمر پی‌لود (هر زبان در ← هرچیز بیرون)، چسب اتوماسیون.
+"""
+
+from eidolon.utils import ok, err, info, warn, spectral
+
+NAME        = "__NAME__"
+VERSION     = "0.1.0"
+DESCRIPTION = "TODO: one sharp line — what this converts / packages / reports"
+CATEGORY    = "__CATEGORY__"
+MODULE_TYPE = "generic"
+AUTHOR      = "__AUTHOR__"
+
+PAYLOAD_KIND = "none"
+REQUIREMENTS = []
+
+OPTIONS = {
+    "input":  {"value": "", "required": True,  "desc": "input (file, string …)"},
+    "output": {"value": "", "required": False, "desc": "write result here (empty = print)"},
+}
+
+
+def run(opts):
+    src = str(opts.get("input", "")).strip()
+    if not src:
+        return err("set it: set input <value>")
+    info(f"__NAME__: working on {src!r}")
+    result = "TODO: transform here"
+
+    out = str(opts.get("output", "")).strip()
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(str(result))
+        ok(f"result → {out}")
+    else:
+        ok(f"result: {result}")
+''',
+    },
+}
 
 
 def _type_label(mod) -> str:
@@ -274,6 +1188,7 @@ class Eidolon(cmd.Cmd):
         self.current_options = None
         self._wraith_listener = None
         self._wraith_lock = threading.RLock()
+        self.jobs = JobManager()
 
         self.session_t0 = time.time()
         self.operator_name = "root"
@@ -943,12 +1858,21 @@ class Eidolon(cmd.Cmd):
     # MODULE SCAFFOLDING (new_module)
     # ═══════════════════════════════════════════════════════════════════
     def do_new_module(self, arg):
-        """new_module <name> [dir] — Scaffold a guided module skeleton"""
-        args = arg.strip().split()
-        if not args:
-            return err("usage: new_module <name> [target_dir]")
+        """new_module <name> [dir] [--fa] [type] — scaffold a fully documented
+        module skeleton; type: exploit|listener|payload|auxiliary|generic
+        (--fa = complete Persian field documentation; default English)"""
+        types_map = {
+            "exploit": "exploit", "listener": "listener", "server": "listener",
+            "payload": "payload", "c2": "payload", "auxiliary": "auxiliary",
+            "aux": "auxiliary", "generic": "generic",
+        }
+        toks = arg.split()
+        persian = "--fa" in toks
+        toks = [t for t in toks if t != "--fa"]
+        if not toks:
+            return err("usage: new_module <name> [dir] [--fa] [exploit|listener|payload|auxiliary|generic]")
 
-        raw_name = args[0].strip("/")
+        raw_name = toks[0].strip("/")
         if not raw_name:
             return err("module name cannot be empty")
         parts = [p for p in raw_name.split("/") if p and p != "."]
@@ -958,11 +1882,30 @@ class Eidolon(cmd.Cmd):
             if not all(ch.isalnum() or ch in "_-" for ch in p):
                 return err(f"invalid characters in name (letters, digits, _ or - only): {raw_name!r}")
 
+        mtype = None
+        target_dir = None
+        for tok in toks[1:]:
+            low = tok.lower().lstrip("-")
+            if low in types_map and mtype is None:
+                mtype = types_map[low]
+            elif target_dir is None:
+                target_dir = tok
+        if mtype is None:
+            info("module types: 1=exploit (weapon delivery) · 2=listener (C2 server) · "
+                 "3=payload (builder) · 4=auxiliary (recon/support) · 5=generic (tools)")
+            try:
+                reply = input("  ? module type [1-5 or name]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return err("aborted — module type required")
+            mtype = {"1": "exploit", "2": "listener", "3": "payload",
+                     "4": "auxiliary", "5": "generic"}.get(reply) or types_map.get(reply.lower())
+            if not mtype:
+                return err(f"unknown module type: {reply!r}")
+
         base    = parts[-1]
         rel_key = "/".join(parts)
-
-        if len(args) > 1:
-            target_dir  = os.path.expanduser(args[1])
+        if target_dir:
+            target_dir  = os.path.expanduser(target_dir) if target_dir.startswith("~") else target_dir
             target_file = os.path.join(target_dir, base + ".py")
             external    = True
         else:
@@ -973,10 +1916,14 @@ class Eidolon(cmd.Cmd):
             return err(f"already exists: {target_file}")
 
         category = parts[0] if len(parts) > 1 else "custom"
-        content = (_NEW_MODULE_TEMPLATE
+        lang = "fa" if persian else "en"
+        try:
+            template = _MODULE_SCAFFOLDS[mtype][lang]
+        except KeyError:
+            return err(f"no {lang} scaffold for type {mtype!r}")
+        content = (template
                    .replace("__NAME__", base)
                    .replace("__CATEGORY__", category)
-                   .replace("__TYPE__", "generic")
                    .replace("__AUTHOR__", self.operator_name))
 
         try:
@@ -986,13 +1933,15 @@ class Eidolon(cmd.Cmd):
         except OSError as e:
             return err(f"cannot write module: {e}")
 
+        kind = "fa (Persian docs)" if persian else "en (English docs)"
         if not external:
             self.trust_mgr.register_untrusted(rel_key, target_file, source="local")
-            ok(f"scaffolded {C.CYAN}{rel_key}{C.RESET} → {target_file}")
+            ok(f"scaffolded {C.CYAN}{rel_key}{C.RESET} → {target_file} [{mtype} · {kind}]")
             warn("module is UNTRUSTED (TOFU)")
-            info(f"edit it, then: {C.PINK}trust {rel_key}{C.RESET}  →  {C.PINK}use {rel_key}{C.RESET}  →  {C.PINK}run{C.RESET}")
+            info(f"read the doc inside, then: {C.PINK}trust {rel_key}{C.RESET}  →  "
+                 f"{C.PINK}use {rel_key}{C.RESET}  →  {C.PINK}set …{C.RESET}  →  {C.PINK}run{C.RESET}")
         else:
-            ok(f"scaffolded {C.CYAN}{base}{C.RESET} → {target_file}")
+            ok(f"scaffolded {C.CYAN}{base}{C.RESET} → {target_file} [{mtype} · {kind}]")
             warn(f"outside the modules dir — it will NOT be auto-loaded; move it under {MODULES_DIR}")
         self.load_modules()
 
@@ -1061,12 +2010,14 @@ class Eidolon(cmd.Cmd):
         print(f"  {C.PINK}── REPO ──{C.RESET}")
         print(f"  {C.CYAN}repo{C.RESET} <list|add|remove|enable|disable|priority|sync|search|list-modules|stats|check|install|upgrade|update-all|pack|source|info>")
         print(f"  {C.PINK}── LOCAL ──{C.RESET}")
-        print(f"  {C.CYAN}new_module{C.RESET} <name> [dir]      — scaffold a guided module skeleton")
+        print(f"  {C.CYAN}new_module{C.RESET} <name> [dir] [--fa] [type] — fully documented scaffold (exploit/listener/payload/auxiliary/generic)")
         print(f"  {C.CYAN}add_module{C.RESET} <src> [dest] [--force]")
         print(f"  {C.CYAN}install_local{C.RESET} <src> [dest] [--force]")
         print(f"  {C.CYAN}remove{C.RESET} <name> / {C.CYAN}setg{C.RESET} <k> <v> / {C.CYAN}globals{C.RESET}")
-        print(f"  {C.PINK}── C2 (WRAITH) ──{C.RESET}")
-        print(f"  {C.CYAN}c2{C.RESET} <serve|status|sessions|payloads|stop> — built-in WebSocket C2\n")
+        print(f"  {C.PINK}── C2 (WRAITH KERNEL) ──{C.RESET}")
+        print(f"  {C.CYAN}gen{C.RESET} <payload module>     — select a builder (params via set, build via run)")
+        print(f"  {C.CYAN}jobs{C.RESET} / {C.CYAN}kill <id>{C.RESET}          — background jobs · {C.CYAN}c2{C.RESET} <status|sessions|payloads>")
+        print(f"  {C.CYAN}use{C.RESET} <sid>              — enter a live C2 session (module-owned shell)\n")
 
     def do_banner(self, arg): print_banner(animate=True)
     def do_clear(self, arg): os.system("cls" if os.name == "nt" else "clear")
@@ -1097,10 +2048,12 @@ class Eidolon(cmd.Cmd):
 
     def do_exit(self, arg):
         """exit / quit — leave tool"""
-        lsn = getattr(self, "_wraith_listener", None)
-        if lsn and lsn.running:
-            lsn.stop()
-            spectral("wraith listener shut down")
+        try:
+            stopped = self.jobs.shutdown_all()
+        except Exception:
+            stopped = 0
+        if stopped:
+            spectral(f"{stopped} background job(s) shut down")
         if self._subshell_active:
             self.exit_subshell(); ok("returned to Eidolon"); return False
         print(f"\n  {C.PURPLE}╰─{C.RESET} {C.CYAN}eidolon out.{C.RESET}  {C.GRAY}uptime: {_uptime_str(self.session_t0)}{C.RESET}\n")
@@ -1210,6 +2163,9 @@ class Eidolon(cmd.Cmd):
         print()
 
     def do_use(self, arg):
+        if arg.strip() and not self._resolve(arg):
+            if self._session_interact(arg.strip()) == "handled":
+                return
         name = self._resolve(arg)
         if not name:
             raw = arg.strip()
@@ -1230,6 +2186,36 @@ class Eidolon(cmd.Cmd):
         if missing:
             warn(f"missing requirements: {', '.join(missing)} — see {C.PINK}deps {name}{C.RESET}")
         self.do_options("")
+
+    def _session_interact(self, ref):
+        """Resolve a wraith SESSION reference and hand the console to the
+        listener module that owns it — sess.interact(EIDOLON_SHELL). The
+        framework ONLY resolves and steps aside: the inner shell, its prompt,
+        its commands and its tab completion are entirely module business.
+        Returns "handled" when the console was handed over/errored.
+        """
+        try:
+            from eidolon.wraith import sessions as wsessions
+        except ImportError:
+            return None
+        try:
+            sess = wsessions.default_registry().find(ref)
+        except ValueError as e:
+            err(str(e))
+            return "handled"
+        if sess is None:
+            return None
+        handler = getattr(sess, "interact", None)
+        if not callable(handler):
+            err(f"session {sess.sid[:8]} offers no interactive shell — "
+                f"its listener module attached no interact() handler")
+            return "handled"
+        ok(f"entering session {C.PINK}{sess.sid[:8]}{C.RESET} — {sess.label}")
+        try:
+            handler(self)
+        except Exception as e:
+            err(f"session handoff failed: {e}")
+        return "handled"
 
     def do_back(self, arg):
         if self._subshell_active: self.exit_subshell()
@@ -1274,7 +2260,7 @@ class Eidolon(cmd.Cmd):
         spec = self.current_options[key]
         if spec.get("kind") == "payload" and str(val).strip():
             try:
-                from wraith import store
+                from eidolon.wraith import store
                 _, manifest = store.resolve_payload(str(spec["value"]), kinds=spec.get("types") or None)
             except ImportError as e:
                 self.current_options[key]["value"] = old
@@ -1310,6 +2296,18 @@ class Eidolon(cmd.Cmd):
         values, payload_error = self._resolve_payload_values(values)
         if payload_error:
             return err(f"payload option rejected — {payload_error}")
+        mtype = _module_type(self.current)
+        if mtype == MODULE_TYPE_PAYLOAD:
+            try:
+                from eidolon.wraith import store as wstore
+                before = set(wstore.list_payloads())
+            except ImportError:
+                before = None
+        if "--bg" in (arg or "").split() or mtype == MODULE_TYPE_LISTENER:
+            job = self.jobs.submit(self.current, self.current_name, values)
+            ok(f"job #{job.jid} started — {self.current_name} (background)")
+            info(f"manage: {C.CYAN}jobs{C.RESET} · stop with {C.CYAN}kill {job.jid}{C.RESET}")
+            return
         hr(C.PURPLE)
         print(f"  {C.PINK}◈{C.RESET} {C.BOLD}EXECUTING OPERATION{C.RESET}")
         print(f"  {C.SHADOW}├─{C.RESET} module : {C.PINK}{self.current_name}{C.RESET}")
@@ -1321,6 +2319,15 @@ class Eidolon(cmd.Cmd):
             if os.environ.get("EIDOLON_DEBUG"): traceback.print_exc()
         if not self._subshell_active:
             hr(C.PURPLE); ok("operation complete")
+        if mtype == MODULE_TYPE_PAYLOAD and before is not None:
+            try:
+                from eidolon.wraith import store as wstore
+                for n, manifest in wstore.list_payloads().items():
+                    if n in before:
+                        continue
+                    info(f"registered payload: {C.CYAN}{n}{C.RESET} — {wstore.summary(manifest)}")
+            except ImportError:
+                pass
 
     def do_deps(self, arg):
         """deps <module> — Show module pip requirements (printed, never installed)"""
@@ -1336,6 +2343,48 @@ class Eidolon(cmd.Cmd):
         warn("the framework never installs anything automatically (security)")
         info(f"install manually: {C.BOLD}pip install {' '.join(reqs)}{C.RESET}")
 
+    def do_gen(self, arg):
+        """gen <payload module> — select a payload BUILDER; params via set, build via run"""
+        name = self._resolve(arg)
+        if not name or name not in self.modules:
+            return err(f"module '{arg.strip()}' not found or not loaded — see: {C.CYAN}modules{C.RESET}")
+        mod = self.modules[name]
+        mtype = _module_type(mod)
+        if mtype == MODULE_TYPE_LISTENER:
+            return err(f"'{name}' is a listener — listeners are free modules, the framework "
+                       f"normalizes nothing: {C.CYAN}use {name}{C.RESET} → {C.CYAN}set port …{C.RESET} → "
+                       f"{C.CYAN}run{C.RESET} (auto-backgrounds as a job)")
+        if mtype != MODULE_TYPE_PAYLOAD:
+            return err(f"'{name}' is a '{mtype}' module — gen selects payload (builder) modules")
+        self.do_use(name)
+        print(f"  {C.PINK}\u25c8{C.RESET} {C.BOLD}GEN MODE{C.RESET} — parameters via {C.CYAN}set <key> <value>{C.RESET} · "
+              f"build + register: {C.CYAN}run{C.RESET}")
+        info(f"payloads land in the typed store — list with: {C.CYAN}c2 payloads{C.RESET}")
+
+    def do_jobs(self, arg):
+        """jobs — list background jobs (listeners, long-running modules)"""
+        jobs = self.jobs.all()
+        if not jobs:
+            return info("no background jobs — listener modules started with gen appear here")
+        marks = {"running": (C.GREEN, "●"), "done": (C.GRAY, "○"), "exited": (C.GRAY, "○"),
+                 "stopped": (C.GRAY, "○"), "failed": (C.RED, "✗")}
+        rows = []
+        for j in jobs:
+            color, mark = marks.get(j.status, (C.YELLOW, "○"))
+            rows.append([f"{C.PINK}#{j.jid}{C.RESET}", f"{C.CYAN}{j.name}{C.RESET}",
+                         f"{color}{mark} {j.status}{C.RESET}", _uptime_str(j.started),
+                         (j.error or "-")[:40]])
+        print_table(["ID", "Module", "Status", "Uptime", "Error"], rows, title="BACKGROUND JOBS")
+        info(f"stop one with: {C.PINK}kill <id>{C.RESET}")
+
+    def do_kill(self, arg):
+        """kill <id> — stop a background job (calls the module's stop())"""
+        token = arg.strip().lstrip("#")
+        if not token.isdigit():
+            return err("usage: kill <job id> — see: jobs")
+        okk, msg = self.jobs.kill(int(token))
+        (ok if okk else err)(msg)
+
     def _payload_specs(self, options):
         """Option specs declared as "kind": "payload" — the dedicated payload
         field. These resolve against the typed wraith store: `set KEY <ref>`
@@ -1343,15 +2392,15 @@ class Eidolon(cmd.Cmd):
         """
         return {k: v for k, v in (options or {}).items() if v.get("kind") == "payload"}
 
-    def _resolve_payload_values(self, values):
+    def _resolve_payload_values(self, values, module=None):
         """Swap every payload-kind option's raw ref (store name or path) for
         its manifest dict (+ path). Returns (values, error_or_None).
         """
-        specs = self._payload_specs(getattr(self.current, "OPTIONS", {}))
+        specs = self._payload_specs(getattr(module or self.current, "OPTIONS", {}))
         if not specs:
             return values, None
         try:
-            from wraith import store
+            from eidolon.wraith import store
         except ImportError as e:
             return values, f"payload subsystem unavailable: {e}"
         for key, meta in specs.items():
@@ -1370,8 +2419,15 @@ class Eidolon(cmd.Cmd):
         """The running wraith Listener (or None). Payload-builder modules
         read the operator profile from here: EIDOLON_SHELL.wraith_listener
         gives .url / .token / .tags of the listener that is up right now.
+        Listener modules assign themselves here at start().
         """
         return getattr(self, "_wraith_listener", None)
+
+    @wraith_listener.setter
+    def wraith_listener(self, value):
+        """Listener modules publish their operating profile: any object (or
+        simple namespace) that carries .url / .token / .tags."""
+        self._wraith_listener = value
 
     # ── WRAITH C2 subsystem ───────────────────────────────────────────────────────────
     def _c2_on_event(self, event):
@@ -1394,118 +2450,70 @@ class Eidolon(cmd.Cmd):
                 pass
 
     def do_c2(self, arg):
-        """c2 <serve|status|sessions|payloads|stop> — WebSocket C2 subsystem (Wraith)"""
+        """c2 <status|sessions|payloads> — read-only view over the C2 kernel
+        (the framework ships no listener: listener modules are started with gen)"""
         try:
-            from wraith import protocol
-            from wraith.listener import Listener
-            from wraith import store
+            from eidolon.wraith import store
+            from eidolon.wraith import sessions as wsessions
         except ImportError as e:
-            return err(f"c2 subsystem unavailable: {e} — try: pip install 'websockets>=11'")
+            return err(f"c2 kernel unavailable: {e}")
 
         parts = shlex.split(arg or "")
         sub = parts[0] if parts else ""
-        rest = parts[1:]
 
         if not sub or sub == "help":
-            print(f"\n  {C.PURPLE}╭─ WRAITH C2 ────────────────────────────╮{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 serve{C.RESET} [--host H] [--port N] [--token T] [--path P] [--tls] [--cert F --key F]")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 status{C.RESET}                 \u2014 listener + session counts")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 sessions{C.RESET}               \u2014 live session table")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 payloads{C.RESET}               \u2014 list the typed payload store")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 stop{C.RESET}                    \u2014 shut the listener down")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}handshake: listener \u2194 payload must share a protocol tag (e.g. ws-json-async){C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}builders are payload MODULES (module type 'payload') — the framework ships{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}no payload sources and no compilers: the module script builds the artifact{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}in ANY language from its own sources and registers it via{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}wraith.store.register_payload(){C.RESET}{C.GRAY} \u2014 profile (url/token/tags) from{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}EIDOLON_SHELL.wraith_listener{C.RESET}{C.GRAY} whenever a listener is running{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}exploits take them through the dedicated field: declare an option with{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}\"kind\": \"payload\"{C.RESET}{C.GRAY} ({C.CYAN}\"types\": (…){C.RESET}{C.GRAY}) \u2014 validated on set, manifest dict at run{C.RESET}")
-            print(f"  {C.PURPLE}╰────────────────────────────────────────╯\n")
-            return
-
-        if sub == "serve":
-            lsn = self._wraith_listener
-            if lsn and lsn.running:
-                return warn(f"listener already running on {C.BOLD}{lsn.url}{C.RESET} — stop it first")
-            opts = {"host": "0.0.0.0", "port": None, "token": None, "path": None,
-                    "tags": None, "tls": False, "cert": None, "key": None}
-            i = 0
-            while i < len(rest):
-                a = rest[i]
-                if a in ("--host", "--port", "--token", "--path", "--cert", "--key", "--tags") and i + 1 < len(rest):
-                    opts[a[2:]] = rest[i + 1]; i += 2
-                elif a == "--tls":
-                    opts["tls"] = True; i += 1
-                else:
-                    return err(f"unknown serve option: {a!r}")
-            try:
-                lsn = Listener(
-                    host=opts["host"],
-                    port=int(opts["port"]) if opts["port"] else 0,
-                    token=opts["token"],
-                    endpoint_path=opts["path"],
-                    tls=opts["tls"],
-                    certfile=opts["cert"],
-                    keyfile=opts["key"],
-                    tags=opts["tags"].split(",") if opts["tags"] else None,
-                    on_event=self._c2_on_event,
-                )
-            except ValueError as e:
-                return err(f"bad option: {e}")
-            try:
-                lsn.start()
-            except Exception as e:
-                return err(f"listener failed to start: {e}")
-            self._wraith_listener = lsn
-            self._wraith_lock = threading.RLock()
-            if str(opts["host"]) not in ("127.0.0.1", "localhost", "::1"):
-                warn(f"listener binds {opts['host']} — anyone who reaches this interface can "
-                     f"knock on the hidden endpoint (the token stays the gate)")
-            scheme_note = " (ephemeral self-signed cert)" if (lsn.tls and not opts["cert"]) else ""
-            print(f"\n  {C.GREEN}⬢{C.RESET} {C.BOLD}listener online{C.RESET}{C.GRAY}{scheme_note}{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  url       : {C.CYAN}{lsn.url}{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  token     : {C.CYAN}{lsn.token}{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  endpoint  : {lsn.endpoint_path}")
-            print(f"  {C.PURPLE}│{C.RESET}  protocol  : {C.CYAN}{' '.join(lsn.tags)}{C.RESET} {C.GRAY}(payloads must share one tag){C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}payload builders: payload-type modules — see c2 help{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}payloads dial this URL home; connect events are reported live{C.RESET}")
-            print(f"  {C.PURPLE}╰{C.RESET}  {C.GRAY}next: {C.CYAN}c2 payloads{C.RESET}{C.GRAY} → typed store · {C.CYAN}use <payload module> run{C.RESET}{C.GRAY} → build · {C.CYAN}c2 sessions{C.RESET}{C.GRAY}\n{C.RESET}")
+            print(f"\n  {C.PURPLE}╭─ WRAITH C2 ──────────────────────────╮{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 status{C.RESET}                 — listener profile + session counts")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 sessions{C.RESET}               — live session table")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 payloads{C.RESET}               — list the typed payload store")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}listeners + builders are MODULES (module types 'listener' / 'payload'):{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}the framework ships none — write or install one, then:{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}use <listener>{C.RESET}{C.GRAY} → {C.CYAN}set …{C.RESET}{C.GRAY} → {C.CYAN}run{C.RESET}{C.GRAY} (auto-backgrounds as a job){C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}gen <payload module>{C.RESET}{C.GRAY} → select builder · {C.CYAN}set{C.RESET}{C.GRAY} params · {C.CYAN}run{C.RESET}{C.GRAY} builds+registers{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}builders read the listener profile from {C.CYAN}EIDOLON_SHELL.wraith_listener{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}no wire contract: capabilities (shell, screenshot, …) are agreements{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}between YOUR listener and YOUR payload — the kernel never mediates{C.RESET}")
+            print(f"  {C.PURPLE}╰────────────────────────────{C.RESET}\n")
             return
 
         if sub == "status":
-            lsn = self._wraith_listener
-            if not lsn or not lsn.running:
-                return info(f"listener offline — start one with {C.CYAN}c2 serve{C.RESET}")
-            counts = lsn.registry.counts()
+            reg = wsessions.default_registry()
+            counts = reg.counts()
+            lsn = self.wraith_listener
             print(f"\n  {C.PURPLE}╭─ WRAITH STATUS ──────────────────────╮{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  listener : {C.GREEN}● online{C.RESET}  {lsn.url}")
-            print(f"  {C.PURPLE}│{C.RESET}  tls      : {'wss' if lsn.tls else C.GRAY + 'off' + C.RESET}")
+            if lsn is not None:
+                tags = " ".join(getattr(lsn, "tags", ()) or ()) or "-"
+                print(f"  {C.PURPLE}│{C.RESET}  listener : {C.GREEN}● online{C.RESET}  {getattr(lsn, 'url', '?')}")
+                print(f"  {C.PURPLE}│{C.RESET}  tags     : {C.CYAN}{tags}{C.RESET} {C.GRAY}(free metadata — payloads embed whatever they like){C.RESET}")
+            else:
+                print(f"  {C.PURPLE}│{C.RESET}  listener : {C.GRAY}○ none — use <listener module> · set … · run (auto-job){C.RESET}")
+            active_jobs = len(self.jobs.active())
+            print(f"  {C.PURPLE}│{C.RESET}  jobs     : {C.CYAN}{active_jobs}{C.RESET} running · see {C.CYAN}jobs{C.RESET}")
             print(f"  {C.PURPLE}│{C.RESET}  sessions : {C.GREEN}{counts['active']}{C.RESET} active · {C.YELLOW}{counts['lost']}{C.RESET} lost · {counts['total']} total")
             print(f"  {C.PURPLE}│{C.RESET}  store    : {C.CYAN}{store.STORE_DIR}{C.RESET}")
-            print(f"  {C.PURPLE}╰──────────────────────────────────────╯\n")
+            print(f"  {C.PURPLE}╰───────────────────────────────────╰\n{C.RESET}")
             return
 
         if sub == "sessions":
-            lsn = self._wraith_listener
-            if not lsn or not lsn.running:
-                return info("listener offline.")
+            reg = wsessions.default_registry()
             rows = []
-            for s in lsn.registry.all():
+            for s in reg.all():
                 mark = f"{C.GREEN}●{C.RESET}" if s.status == "active" else f"{C.GRAY}○{C.RESET}"
                 rows.append([mark, f"{C.PINK}{s.sid[:8]}{C.RESET}", f"{s.user}@{s.host}",
                              f"{s.implant}/{s.os}-{s.arch}", s.addr,
                              _uptime_str(s.connected_at)])
             if not rows:
-                return info("no sessions yet — run a payload-type module and deliver its artifact.")
+                return info("no sessions yet — gen a listener module, then deliver an artifact.")
             print_table(["", "SID", "Identity", "Implant", "Address", "Uptime"], rows,
                         title="WRAITH SESSIONS")
+            info(f"interact: {C.CYAN}use <sid-prefix>{C.RESET} — full handoff to the "
+                 f"listener module's own shell (tab completion included)")
             return
 
         if sub == "payloads":
             payloads = store.list_payloads()
             if not payloads:
-                return info(f"payload store empty \u2014 a payload-type module fills it via store.register_payload()")
+                return info("payload store empty — a payload-type module fills it via store.register_payload()")
             rows = []
             for p in payloads.values():
                 rows.append([C.PINK + p["name"] + C.RESET, p.get("type", "?"),
@@ -1516,15 +2524,6 @@ class Eidolon(cmd.Cmd):
             print_table(["Name", "Type", "Protocol", "Backend", "OS/Arch", "SHA256"], rows,
                         title=f"PAYLOAD STORE · {store.STORE_DIR}")
             return
-
-        if sub == "stop":
-            lsn = self._wraith_listener
-            if not lsn or not lsn.running:
-                self._wraith_listener = None
-                return info("listener already offline.")
-            lsn.stop()
-            self._wraith_listener = None
-            return ok("listener shut down")
 
         return err(f"unknown c2 subcommand: {sub!r} — try {C.CYAN}c2{C.RESET} for help")
 
@@ -1571,6 +2570,11 @@ class Eidolon(cmd.Cmd):
     # ═════════════════════════════════════════════════════════
     def complete_new_module(self, text, line, begidx, endidx):
         parts = line.split()
+        n_before = len(parts) - (0 if line.endswith(" ") else 1) - 1
+        if n_before >= 2:
+            names = ("exploit", "listener", "payload", "auxiliary",
+                     "generic", "--fa")
+            return [w for w in names if w.startswith(text)]
         in_first = (len(parts) == 1) or (len(parts) == 2 and not line.endswith(" "))
         if in_first:
             # completing the module name: existing category dirs under MODULES_DIR
@@ -1664,7 +2668,34 @@ class Eidolon(cmd.Cmd):
                 return [r['url'] for r in self.repo_mgr.remotes if r['url'].startswith(text)]
         return []
 
-    def complete_use(self, text, *_): return [m for m in self.modules if m.startswith(text)]
+    def complete_use(self, text, *_):
+        hits = [m for m in self.modules if m.startswith(text)]
+        try:
+            from eidolon.wraith import sessions as wsessions
+            hits += [s.sid for s in wsessions.default_registry().active()
+                     if s.sid.startswith(text)]
+        except Exception:
+            pass
+        return hits
+
+    def complete_gen(self, text, *_):
+        return [m for m in self.modules
+                if m.startswith(text)
+                and _module_type(self.modules[m]) in (MODULE_TYPE_PAYLOAD, MODULE_TYPE_LISTENER)]
+    def complete_kill(self, text, *_): return [str(j.jid) for j in self.jobs.all() if str(j.jid).startswith(text)]
+    def complete_c2(self, text, line, begidx, endidx):
+        parts = line.split()
+        if len(parts) <= 1:
+            return [x for x in ("status", "sessions", "payloads") if x.startswith(text)]
+        return []
+    def complete_deps(self, text, line, begidx, endidx):
+        if len(line.split()) <= 1:
+            return [m for m in self.modules if m.startswith(text)]
+        return []
+    def complete_show(self, text, line, begidx, endidx):
+        if len(line.split()) <= 1:
+            return [x for x in ("options", "modules") if x.startswith(text)]
+        return []
     def complete_info(self, text, *_):
         known = list(self.modules.keys()) + list(self._untrusted.keys())
         return [m for m in known if m.startswith(text)]
@@ -1673,7 +2704,7 @@ class Eidolon(cmd.Cmd):
     def complete_help(self, text, *_):
         cmds = ["help","banner","clear","reload","exit","modules","ls","search","info","use","back",
                 "options","set","unset","run","sessions","deps","new_module","add_module","install_local","remove",
-                "setg","globals","status","repo",
+                "setg","globals","status","repo","c2",
                 "trust","untrust","trusted","verify"]
         return [x for x in cmds if x.startswith(text)]
 

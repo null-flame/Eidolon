@@ -1,8 +1,13 @@
 """Typed payload store — built payloads live here, labeled with a type so a
 payload can never be swapped into a delivery path that does not fit.
 
+This is the kernel's only opinion about payloads: they have a TYPE (so the
+wrong artifact cannot slip into a delivery path silently) and nothing else is
+imposed — wire format, transport, handshake, encodings and limits are entirely
+between a listener module and the payload the operator builds for it.
+
 Layout: ~/.eidolon/payloads/<name>/{manifest.json, <artifact>}
-Manifest: {"name","type","backend","os","arch","created","file","sha256","note"}
+Manifest: {"name","type","backend","os","arch","created","file","sha256","note","protocol"}
 
 Types (advisory taxonomy — delivery is always the module author's business):
   file-posix : compiled runnable artifact for POSIX targets (ELF / mach-o)
@@ -33,8 +38,6 @@ import os
 import shutil
 import time
 
-from wraith.protocol import clean_tags
-
 WORKSPACE_DIR = os.path.join(os.path.expanduser("~"), ".eidolon")
 STORE_DIR = os.path.join(WORKSPACE_DIR, "payloads")
 
@@ -46,6 +49,14 @@ TYPE_CODE = "code"
 TYPE_EXTERNAL = "external"
 
 PAYLOAD_TYPES = (TYPE_FILE_POSIX, TYPE_FILE_WIN, TYPE_SHELLCODE, TYPE_CMD, TYPE_CODE)
+
+
+def _tags_str(tags):
+    if not tags:
+        return ""
+    if isinstance(tags, str):
+        return tags.strip()
+    return ";".join(str(t).strip() for t in tags if str(t).strip())
 
 
 def _manifest_path(name):
@@ -91,8 +102,11 @@ def register_payload(name, artifact_path, ptype, backend=None, target_os=None,
     """Move an artifact into the store and write its typed manifest.
 
     Returns the manifest dict. Raises on a bad type or a missing artifact.
-    `protocol_tag` pins the wire dialect (e.g. "ws-json-async") so compatible
-    listeners/payloads can be matched without guesswork.
+    `protocol_tag` is OPTIONAL free metadata (a single tag like
+    "ws-json-async" or several) — purely informational: it labels which wire
+    dialect the artifact was built to speak so c2 payloads / any module can
+    display or filter on it. The kernel never connects anything itself, so it
+    never enforces a handshake.
     """
     if ptype not in PAYLOAD_TYPES:
         raise ValueError(
@@ -118,7 +132,7 @@ def register_payload(name, artifact_path, ptype, backend=None, target_os=None,
         "file": os.path.basename(dest),
         "sha256": _sha256(dest),
         "note": note or "",
-        "protocol": ";".join(clean_tags(protocol_tag)) if protocol_tag else "",
+        "protocol": _tags_str(protocol_tag),
     }
     with open(_manifest_path(name), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
