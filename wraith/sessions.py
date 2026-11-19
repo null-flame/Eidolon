@@ -15,8 +15,12 @@ def default_registry():
     """Process-wide shared registry.
 
     Listener modules that register sessions here get free integration with
-    the framework's `c2 sessions` / `c2 status` views. Modules may equally
-    keep a private SessionRegistry — the kernel only offers, never imposes.
+    the framework's `c2 sessions` / `c2 status` views — and, if the listener
+    module attaches a callable to a session's `interact` attribute, the
+    framework's `use <sid>` command hands the console straight to it (the
+    module owns the inner shell, its prompt and its tab completion). Modules
+    may equally keep a private SessionRegistry — the kernel only offers,
+    never imposes.
     """
     global _default_registry
     if _default_registry is None:
@@ -39,6 +43,7 @@ class Session:
     status: str = "active"
     results: deque = field(default_factory=lambda: deque(maxlen=RESULT_HISTORY))
     pending: int = 0
+    interact: object = None  # module-side ONLY: callable(EIDOLON_SHELL) — `use <sid>` hands over (prompt, commands, tab completion: all module business)
 
     @property
     def label(self):

@@ -47,11 +47,12 @@ Eidolon is built on four deliberate refusals:
    enforces nothing and judges nothing.
 3. **The C2 is a separate layer.** Eidolon owns the exploit chain up to execution,
    then hands off. That layer lives in-repo as the **Wraith kernel** — a dependency-free
-   `wraith/` SDK (wire protocol, session registry, typed payload store) that ships
-   **zero servers and zero builders**: listeners and payload builders are ordinary
-   modules running on top of it. The import boundary is real: `eidolon/` never imports
-   `wraith/`, exploits never speak C2, and pointing a payload at Sliver or any other
-   C2 instead remains a legitimate, first-class choice.
+   `wraith/` SDK (a session registry + a typed payload store — two files, and that is
+   all) that ships **zero servers, zero builders, zero wire contracts**: listeners and
+   payload builders are ordinary modules; everything that actually runs is an agreement
+   between two of them. The import boundary is real: `eidolon/` never imports `wraith/`,
+   exploits never speak C2, and pointing a payload at Sliver or any other C2 instead
+   remains a legitimate, first-class choice.
 4. **Trust is earned, never assumed.** Downloads are verified by SHA-256 when the index
    provides it, and *cannot* proceed silently when it doesn't. First run of any module is
    recorded as untrusted (TOFU — Trust On First Use).
@@ -188,14 +189,13 @@ OPTIONS = {"payload": {"value": "", "required": False,
 def run(opts):
     artifact = opts["payload"]["path"]          # ready to deliver
     opts["payload"]["type"]                   # "file-posix" — the store guarantees it
-    opts["payload"]["protocol"]               # "ws-json-async" — its wire dialect
+    opts["payload"]["protocol"]               # OPTIONAL free label — display only
 ```
 
 `set payload ghost-go` fails on the spot if `ghost-go` is not one of the declared
 types — a wrong artifact can never slip into the wrong delivery path. A raw file
 path always passes (freedom) and arrives typed `"external"`. Under the hood this is
 `wraith.store.resolve_payload()`, which any module may call directly.
-```
 
 Raw operator files (any path) stay first-class: they resolve with type `"external"`
 and the module stays authoritative. Freedom by default, typing when you want it.
@@ -232,40 +232,57 @@ shipped (the packer skips `_*`, `@*`, dotfiles, and `__pycache__`).
 
 A minimal command-and-control **kernel** inside the repository — `wraith/` —
 **never imported by the exploit engine**, shipping **zero servers, zero
-listeners, zero compilers**. The kernel is the shared tongue and the shelves;
-everything that runs is an ordinary module written by anyone:
+listeners, zero compilers, zero wire contracts**. The kernel is just the shelves:
+a session registry and a typed payload store. Everything that runs is an ordinary
+module, and every capability is an agreement between two modules — never a rule
+the framework enforces:
 
-- **The kernel is three files** — JSON wire protocol (`protocol.py`), thread-safe
-  session registry (`sessions.py` with a process-wide `default_registry()`), and
-  the typed payload store (`store.py`). No transport code at all.
+- **The kernel is two files** — thread-safe session registry (`sessions.py`, with a
+  process-wide `default_registry()`) and the typed payload store (`store.py`). No
+  protocol document, no frame spec, no transport code. There is exactly one
+  exception the kernel volunteers because it makes life easier: the store keeps a
+  per-artifact **type** so exploits can filter what they are willing to deliver.
 - **Listeners are modules** — a module of type `listener` runs ANY transport it
   likes (WebSocket, raw TCP, HTTP beaconing, whatever comes next) with any
   libraries it likes. Its internal layout is entirely free; the framework knows
-  only its entry script. It registers sessions into the kernel registry,
-  publishes its operating profile (`EIDOLON_SHELL.wraith_listener` → `url` /
-  `token` / `tags`), and defines `stop()`. `gen <module>` starts it as a managed
-  background job.
+  only its entry script — `use <listener>` · `set port 8443` · `run` and done. It
+  registers sessions into the kernel registry, publishes its operating profile
+  (`EIDOLON_SHELL.wraith_listener` → `url` / `token` — plus tags if it wants) and
+  defines `stop()`. Listener-type modules auto-background as jobs on `run`.
 - **Builders are modules, not framework code** — the repository ships **zero**
   payload sources and **zero** compilers. A payload builder is simply a module of
-  type `payload`: its sources sit wherever the author wants (`_src/` or anything
-  else — no convention), the script produces the artifact in *any* language it
-  pleases (Go, Nim, C, Rust, C#, bash, python, PowerShell…), embeds the listener
-  profile (URL + token + tags) however it likes, and registers it in the store —
-  exploits pick it up by name, type-filtered.
+  type `payload`: `gen <builder>` selects it (exactly like `use` — GEN MODE, and
+  the framework never lets it near a listener), its parameters work like an
+  exploit's (`set url …`, `set target_os …`), and `run` builds the artifact in
+  *any* language the author pleases (Go, Nim, C, Rust, C#, bash, python,
+  PowerShell…) and registers it in the store — exploits pick it up by name,
+  type-filtered.
 - **Typed payload store** — every artifact labeled (file-posix / file-win /
   shellcode / cmd / code) with a SHA-256 manifest
-- **Protocol-tag handshake** — listener and payload must share a wire-dialect tag
-  (e.g. `ws-json-async`) or they are refused to ever speak to each other
+- **No wire contract** — the kernel never connects anything, so it never enforces
+  a handshake. A payload's `protocol` tag is OPTIONAL free metadata for humans and
+  remote indexes. If your listener wants to authenticate implants, it may — a
+  wrong token is simply dropped by the listener itself.
+- **Session handoff** — a listener may give a session an `interact` handler. Then
+  `use <sid>` (a prefix is enough) makes the console step aside and the module's
+  own shell take over — your prompt, your commands, full tab completion. `back`
+  returns control; the session may tear itself down for stealth.
 
 ### The two-second workflow
 
 ```
-eidolon ❯ gen wraith-ws/listener port=8443
+eidolon ❯ use c2/ws/listener
+eidolon (listener) ❯ set port 8443
+eidolon (listener) ❯ run                  ⇪ auto-backgrounds
                                          ⬢ job #1 — listener online (hidden endpoint)
-eidolon ❯ gen ghost-implant              (a payload-type module — builds + registers)
-                                         ⬢ stored: ghost-go [file-posix] · ws-json-async
+eidolon ❯ gen ghost-implant              (a payload module — GEN MODE, selection only)
+eidolon (ghost-implant) ❯ set target_os linux
+eidolon (ghost-implant) ❯ run            ⇪ builds + registers
+                                         ⬦ registered payload: ghost-go [file-posix]
 ... exploit module delivers the binary to the target ...
   ⬢ payload connected  5f8e12c2 · alice@corp-ws · go/linux-amd64 · 10.4.2.9:51515
+eidolon ❯ use 5f8e                      (into the live session — module-owned shell,
+                                          full tab completion, capabilities are theirs)
 eidolon ❯ c2 sessions                   (live table — ● active, ○ lost)
 eidolon ❯ kill 1                        (done — anti-forensics: kill-on-detach)
 ```
@@ -277,39 +294,39 @@ target user, host, implant flavor and address.
 
 | Command | Effect |
 |---|---|
-| `gen <listener module> [k=v …]` | start a listener module — background job; missing params are asked, flag values win |
-| `gen <payload module> [k=v …]` | build + register the payload (listener profile embedded, tags stamped) |
+| `use <listener module>` · `set` · `run` | the whole listener story — select it, configure it like any module; `run` auto-backgrounds it as a job |
+| `gen <payload module>` | select a builder (GEN MODE — payload/listener selection only) — params via `set`, build + register via `run` |
+| `use <sid>` | enter a live C2 session — the framework resolves the prefix and steps aside; the module's own shell takes over with full tab completion |
 | `jobs` | background jobs — id · status · uptime |
 | `kill <id>` | clean stop via the module's `stop()` (also automatic on `exit`) |
 | `run --bg` | background ANY module (listener-type modules always run as jobs) |
-| `c2 status` | listener profile, tags, job count, session counts |
-| `c2 sessions` | live session table (active / lost) |
-| `c2 payloads` | the typed payload store (name · type · protocol · backend · sha256) |
+| `c2 status` / `c2 sessions` | read-only view — listener profile, job count, live session table |
+| `c2 payloads` | the typed payload store (name · type · backend · sha256 — protocol if the author labeled one) |
 
-### The protocol-tag handshake
+### No contract, only agreements
 
-Every listener announces the wire dialects it speaks; every payload announces the
-ones it understands. **They connect only on a common tag** — otherwise the
-handshake dies with close code `4403` (and a payload registered under a foreign
-dialect simply never matches an exploit's store filter — the wrong pairing
-cannot happen by accident):
+The kernel refuses to mediate. It never connects to anything, so it cannot
+enforce a protocol — and it will not pretend to. What exists is a soft convention
+that any pair of modules is free to ignore:
 
 ```
-  listener: tags = {ws-json-async}          (listener module option — any count)
-  payload : tags = {ws-json-async}          (embedded at build time)
-  → connect only on ws-json-async ∩ tags ≠ ∅
+  listener module: publishes url + token (+ tags, any count, any vocabulary)
+  payload module : embeds whichever profile it was built against — or none
+  → whether they speak is decided entirely by THEIR code
 ```
 
-One tag in practice, two at most — but the capability space is unbounded, so a
-future dialect (`ws-framed-binary`, …) can coexist with the old one on the same
-box without a single misconnected implant. Remote indexes can pin the dialect of
-a published module with the optional `"protocol"` / `"payload_type"` fields.
+A `protocol` tag in the store manifest (`"ws-json-async"`, `my-funky-dialect`, or
+empty) is a label for humans and optional index fields (`"protocol"` /
+`"payload_type"`) — nothing checks a handshake, no close code kills a connection,
+no frame cap governs a stream. Shell, screenshots, file transfer, credential
+helpers: those exist iff the listener and the payload were built to agree on
+them. That freedom is the point — one author's WS/JSON async pair and another's
+TCP/protobuf pair coexist on the same machine without the kernel ever noticing.
 
-### Architecture — three small files, one folder, zero servers
+### Architecture — two small files, one folder, zero servers
 
 ```
 wraith/
-  protocol.py   the wire contract — frame spec, limits, tag vocabulary
   sessions.py   thread-safe session registry (+ shared default_registry())
   store.py      typed payload store + resolve_payload() type gateway
 ```
@@ -320,11 +337,10 @@ free internal layout (the framework knows only the module's entry script).
 
 The framework itself now carries **zero C2 dependencies** — a WebSocket listener
 module simply declares `websockets>=11` in its `REQUIREMENTS` (displayed by
-`deps`, never auto-installed); TLS certs are module business too. Uploaded/downloaded
-files stream in 256 KB base64 chunks (10 MB cap); frames are capped at 1 MB;
-argv is sanitized (≤128 × 4 KB); outputs clamp at 512 KB. Sessions are marked
-`lost` on disconnect and never crash the listener.
-
+`deps`, never auto-installed). Frame caps, chunk sizes, TLS certs, even whether a
+dropped session marks `lost` or sweeps nothing — every limit and every behavior
+is module business now; the kernel's only opinions are the registry and the
+store.
 ------
 
 ## 🛰️ Repository System
@@ -451,10 +467,11 @@ between runs.
 - Test suite + CI (the install/AES/trust flows are verified end-to-end manually; they
   are being landed as automated tests)
 - `ENFORCE_SHA256 = True` — hard-block hashless archives in an upcoming release
-- **Wraith kernel** — ✅ 3.3.0: the framework ships the SDK only (protocol /
-  sessions / store) plus `gen` / `jobs` / `kill`; listeners and payload builders
-  are modules over any transport (tag handshake + typed store keep them
-  interoperable). Next: session persistence
+- **Wraith kernel** — ✅ 3.3.0: the framework ships the SDK only (sessions /
+  store — two files) plus listener flow (`use` · `set` · `run` auto-job), `gen`
+  builder selection, `jobs` / `kill`, and `use <sid>` session handoff with
+  module-owned tab-completed shells. No wire contract — capabilities are
+  agreements between modules. Next: session persistence
 
 ---
 
