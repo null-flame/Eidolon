@@ -16,6 +16,15 @@ Types (advisory taxonomy — delivery is always the module author's business):
   cmd        : a command line the target's shell executes
   code       : source executed by an interpreter on the target
 
+An ARTIFACT IS NEVER STAGED IN EPHEMERAL STORAGE: builders write the artifact
+wherever the OPERATOR says (default: the operator's current working directory —
+run eidolon in ~/HACK/ and the build lands at ~/HACK/payload.exe) and register
+it with keep=True; the manifest then records the absolute "path" and the file
+STAYS PUT — nothing is copied into temp, nothing into the framework's own
+directories. resolve_payload() likewise refuses raw paths that point into
+ephemeral dirs (/tmp, /var/tmp, /dev/shm, %TEMP%) with an actionable error:
+payload sources are explicit, durable, operator-chosen locations only.
+
 The primary route for exploit modules is the DEDICATED payload field — declare
 an option with `"kind": "payload"` (+ the accepted `"types"`) and the framework
 validates on `set` and hands run() a manifest dict with "path" inside:
@@ -40,6 +49,30 @@ import time
 
 WORKSPACE_DIR = os.path.join(os.path.expanduser("~"), ".eidolon")
 STORE_DIR = os.path.join(WORKSPACE_DIR, "payloads")
+
+# Payload sources / destinations are NEVER these — artifacts are durable,
+# explicit, operator-chosen files, not throwaway staging data.
+EPHEMERAL_DIRS = ("/tmp", "/var/tmp", "/dev/shm")
+
+
+def _is_ephemeral(path):
+    """True when `path` lives in ephemeral storage (tmpfs temp dirs) — the
+    framework refuses such payloads outright so nothing silently depends
+    on staging data that may vanish from under it."""
+    try:
+        rp = os.path.realpath(str(path))
+    except OSError:
+        return False
+    for d in EPHEMERAL_DIRS:
+        if rp == d or rp.startswith(d.rstrip("/") + "/"):
+            return True
+    for var in ("TEMP", "TMP", "TMPDIR"):
+        tmp = os.environ.get(var)
+        if tmp:
+            tmpd = os.path.realpath(os.path.expanduser(tmp))
+            if rp == tmpd or rp.startswith(tmpd.rstrip("/") + "/"):
+                return True
+    return False
 
 TYPE_FILE_POSIX = "file-posix"
 TYPE_FILE_WIN = "file-win"
@@ -98,7 +131,8 @@ def list_payloads():
 
 
 def register_payload(name, artifact_path, ptype, backend=None, target_os=None,
-                     arch=None, note=None, protocol_tag=None):
+                     arch=None, note=None, protocol_tag=None, config=None,
+                     keep=False):
     """Move an artifact into the store and write its typed manifest.
 
     Returns the manifest dict. Raises on a bad type or a missing artifact.
@@ -107,6 +141,15 @@ def register_payload(name, artifact_path, ptype, backend=None, target_os=None,
     dialect the artifact was built to speak so c2 payloads / any module can
     display or filter on it. The kernel never connects anything itself, so it
     never enforces a handshake.
+    `config` is the OPTIONAL build-time configuration (any dict, e.g. the
+    builder's OPTIONS values the operator set via gen/set) — carried along
+    in the manifest so exploits read the payload's setup directly from its
+    output.
+    `keep` keeps the artifact EXACTLY where the builder wrote it (the
+    operator's working directory or an explicit output path — never temp,
+    never a framework-internal copy): the manifest records the absolute
+    location in "path" and the file is left untouched. Default (keep=False)
+    remains the classic move-into-store registration.
     """
     if ptype not in PAYLOAD_TYPES:
         raise ValueError(
@@ -115,12 +158,11 @@ def register_payload(name, artifact_path, ptype, backend=None, target_os=None,
     artifact_path = os.path.abspath(artifact_path)
     if not os.path.isfile(artifact_path):
         raise FileNotFoundError(artifact_path)
-
-    target_dir = store_path(name)
-    os.makedirs(target_dir, exist_ok=True)
-    dest = os.path.join(target_dir, os.path.basename(artifact_path))
-    if os.path.abspath(artifact_path) != os.path.abspath(dest):
-        shutil.move(artifact_path, dest)
+    if _is_ephemeral(artifact_path):
+        raise ValueError(
+            f"refusing to register a payload from ephemeral storage: {artifact_path} — "
+            f"write the artifact to a durable location (e.g. the working directory) first"
+        )
 
     manifest = {
         "name": name,
@@ -129,11 +171,25 @@ def register_payload(name, artifact_path, ptype, backend=None, target_os=None,
         "os": target_os or "",
         "arch": arch or "",
         "created": time.time(),
-        "file": os.path.basename(dest),
-        "sha256": _sha256(dest),
+        "file": os.path.basename(artifact_path),
+        "sha256": _sha256(artifact_path),
         "note": note or "",
         "protocol": _tags_str(protocol_tag),
+        "config": dict(config) if config else {},
     }
+
+    if keep:
+        manifest["path"] = artifact_path
+    else:
+        target_dir = store_path(name)
+        os.makedirs(target_dir, exist_ok=True)
+        dest = os.path.join(target_dir, os.path.basename(artifact_path))
+        if os.path.abspath(artifact_path) != os.path.abspath(dest):
+            shutil.move(artifact_path, dest)
+        manifest["file"] = os.path.basename(dest)
+        manifest["sha256"] = _sha256(dest)
+
+    os.makedirs(os.path.dirname(_manifest_path(name)), exist_ok=True)
     with open(_manifest_path(name), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     return manifest
@@ -148,6 +204,9 @@ def remove_payload(name):
 
 
 def artifact_path(manifest):
+    fixed = manifest.get("path")
+    if fixed:
+        return fixed
     return os.path.join(STORE_DIR, manifest["name"], manifest.get("file", ""))
 
 
@@ -184,7 +243,8 @@ def resolve_payload(ref, kinds=None, quiet=False):
         path = artifact_path(manifest)
         if not os.path.isfile(path):
             raise ValueError(f"stored payload {ref!r} is missing its artifact "
-                             f"({manifest.get('file', '?')})")
+                             f"at {path} — rebuild it (`gen <builder>` + `run`), or re-point "
+                            f"the payload option at an existing file")
         if kinds and manifest.get("type") not in kinds:
             raise ValueError(
                 f"payload {ref!r} is type {manifest.get('type')!r} but this module "
@@ -193,6 +253,11 @@ def resolve_payload(ref, kinds=None, quiet=False):
         return path, manifest
 
     if os.path.isfile(ref):
+        if _is_ephemeral(ref):
+            raise ValueError(
+                f"refusing a payload from ephemeral storage: {ref} — give an explicit, "
+                f"durable path (the artifact must outlive this session)"
+            )
         return os.path.abspath(ref), {"name": os.path.basename(ref), "type": TYPE_EXTERNAL,
                                       "file": os.path.basename(ref)}
 
@@ -208,4 +273,7 @@ def summary(manifest):
         (f"{manifest['os']}/{manifest['arch']}" if manifest.get("os") else ""),
     ) if x)
     tail = f" ({meta})" if meta else ""
+    cfg = manifest.get("config") or {}
+    if cfg:
+        tail += (" · " if meta else " (") + f"config: {len(cfg)}" + ("" if meta else ")")
     return f"{manifest.get('name', '?')} [{mtype}]{tail}"
