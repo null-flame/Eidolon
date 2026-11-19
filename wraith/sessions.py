@@ -8,6 +8,21 @@ from typing import Optional
 
 RESULT_HISTORY = 64
 
+_default_registry = None
+
+
+def default_registry():
+    """Process-wide shared registry.
+
+    Listener modules that register sessions here get free integration with
+    the framework's `c2 sessions` / `c2 status` views. Modules may equally
+    keep a private SessionRegistry — the kernel only offers, never imposes.
+    """
+    global _default_registry
+    if _default_registry is None:
+        _default_registry = SessionRegistry()
+    return _default_registry
+
 
 @dataclass
 class Session:

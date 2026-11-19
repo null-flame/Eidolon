@@ -1,36 +1,44 @@
 """
-Wraith — the C2 subsystem of Eidolon.
+Wraith — the C2 kernel of Eidolon.
 
-A lightweight, self-contained command-and-control layer that lives beside the
-exploit framework without touching it:
+A minimal, dependency-free SDK that lets user-written modules assemble a full
+command-and-control layer WITHOUT the framework shipping any of it:
 
-  * wraith/protocol.py  — JSON-over-WebSocket wire protocol (specs + validation)
-  * wraith/sessions.py  — thread-safe in-memory session registry
-  * wraith/listener.py  — fully async listener (own loop + thread), TLS, auth
+  * wraith/protocol.py  — JSON wire spec + validation (transport-agnostic)
+  * wraith/sessions.py  — thread-safe session registry (+ shared default_registry())
   * wraith/store.py     — typed payload store + type-filtered resolution
 
-There is NO built-in payload source and NO built-in builder in the framework.
-A payload builder is just an ordinary module of type "payload": its sources
-live with the module, its python script compiles/produces the payload in any
-language it likes (go, nim, c, rust, c#, bash, python, …) with the operator
-profile embedded, and it places the artifact in the typed store via
-`wraith.store.register_payload(...)`. Exploit modules consume payloads by
-name through the `"kind": "payload"` option field (type-filtered by the
-store) — the exploit only delivers; the payload dials the listener home.
+There is NO listener, NO payload source and NO builder in the framework.
+Everything that actually runs is an ordinary module written by anyone:
 
-Philosophy (unchanged): exploits deliver, Wraith receives.
+  * a LISTENER module (MODULE_TYPE "listener") starts a server with whatever
+    transport and its own libraries it likes (ws, tcp, http, …), registers sessions
+    into wraith.sessions.default_registry(), exposes its profile through
+    EIDOLON_SHELL.wraith_listener (url / token / tags), and defines stop().
+    `gen <module>` / `run --bg` turn it into a managed background job.
+  * a PAYLOAD module (MODULE_TYPE "payload") is the builder: its internal
+    layout is entirely free (sources may live in _src/, anywhere), its python
+    entry script compiles the artifact in ANY language with the listener
+    profile embedded, and registers it via wraith.store.register_payload(...).
 
-Requires `websockets>=11` (only install-time dep; TLS is optional via
-`cryptography`).
+Exploits consume payloads through the dedicated `"kind": "payload"` option
+field — validated on set against the declared types, then handed to run() as
+a manifest dict with a "path" key.
+
+Philosophy: the kernel defines the shared tongue and the shelves; modules do
+everything else. Exploits deliver, the listener receives.
+
+Listener transports are module business: the only hard requirements are the
+wire contract a payload speaks (protocol.py) and the shelves (sessions/store).
 """
 
-__version__ = "0.2.0-c2.2"
+__version__ = "0.3.0-c2.3"
 
-__all__ = ["protocol", "sessions", "listener", "store"]
+__all__ = ["protocol", "sessions", "store"]
 
 
 def __getattr__(name):
-    if name in ("protocol", "sessions", "listener", "store"):
+    if name in ("protocol", "sessions", "store"):
         import importlib
 
         return importlib.import_module(f"wraith.{name}")

@@ -30,8 +30,9 @@ from eidolon.loader import (
     iter_module_files, load_module_from_path, _module_type, _cleanup_legacy_scaffolds,
     TrustManager,
     MODULE_TYPE_EXPLOIT, MODULE_TYPE_AUXILIARY, MODULE_TYPE_GENERIC,
-    MODULE_TYPE_PAYLOAD,
+    MODULE_TYPE_PAYLOAD, MODULE_TYPE_LISTENER,
 )
+from eidolon.jobs import JobManager
 from eidolon.database import EidolonDB
 from eidolon.repo import RepositoryManager, encrypt_package
 from eidolon import __version__, CODENAME
@@ -81,7 +82,18 @@ MODULE TYPES (MODULE_TYPE — one of):
               (go, nim, c, rust, c#, bash, python, powershell, …) with the
               listener profile embedded and registers it in the typed store
               (see PAYLOAD INTEGRATION below).
+  listener  : the C2 side — starts a long-running server with whatever
+              transport and libraries it likes (ws, tcp, http, grpc, …),
+              registers sessions into wraith.sessions.default_registry(),
+              publishes its profile via EIDOLON_SHELL.wraith_listener
+              (.url/.token/.tags) and defines stop(). `gen <module>` or
+              `run --bg` turns it into a managed background job.
   generic   : everything else (encode/convert/package/report — non-attack helpers).
+
+FREE INTERNAL LAYOUT — the framework knows exactly ONE file, this entry
+  script. Everything around it is yours: sibling .py files, _src/ with raw
+  sources in any language, assets, data — import siblings relative to
+  __eidolon_path__. No naming convention, no required subfolders.
 
 METADATA the CLI displays in `info` / `modules` / remote indexes:
   NAME, VERSION, DESCRIPTION, CATEGORY, MODULE_TYPE, AUTHOR, PAYLOAD_KIND
@@ -98,7 +110,7 @@ PAYLOAD FREEDOM (the deepest rule of Eidolon):
                     from a URL. You own the quoting and escaping.
     PAYLOAD_SRC     source an interpreter on the target executes.
 
-PAYLOAD INTEGRATION with the built-in C2 (wraith) — the dedicated field:
+PAYLOAD INTEGRATION with a LISTENER module (wraith kernel) — the dedicated field:
   EXPLOIT side — declare one option and the framework does the bookkeeping:
 
       OPTIONS = {
@@ -144,6 +156,9 @@ DEPENDENCIES: list pip names in REQUIREMENTS — they are DISPLAYED (`deps`),
 LIFECYCLE HOOK:
   on_load()      runs once when the module is loaded — early sanity checks,
                   toolchain discovery, reading env; anything cheap and safe.
+  stop()         listener / long-running modules: cleanly halt the engine
+                 (close sockets, stop loops). This is what `kill <id>` calls;
+                 a listener without stop() cannot be killed.
 
 HOUSE STYLE (helps reviewers read you):
   * talk to the operator only through eidolon.utils: ok / err / info / warn /
@@ -159,7 +174,7 @@ NAME        = "__NAME__"
 VERSION     = "0.1.0"
 DESCRIPTION = "TODO: one sharp line — what breaking through this does"
 CATEGORY    = "__CATEGORY__"
-MODULE_TYPE = "__TYPE__"          # auxiliary | generic | exploit | payload
+MODULE_TYPE = "__TYPE__"          # auxiliary | generic | exploit | payload | listener
 AUTHOR      = "__AUTHOR__"
 
 # display-only (the framework never enforces it) — classic shapes:
@@ -274,6 +289,7 @@ class Eidolon(cmd.Cmd):
         self.current_options = None
         self._wraith_listener = None
         self._wraith_lock = threading.RLock()
+        self.jobs = JobManager()
 
         self.session_t0 = time.time()
         self.operator_name = "root"
@@ -1065,8 +1081,9 @@ class Eidolon(cmd.Cmd):
         print(f"  {C.CYAN}add_module{C.RESET} <src> [dest] [--force]")
         print(f"  {C.CYAN}install_local{C.RESET} <src> [dest] [--force]")
         print(f"  {C.CYAN}remove{C.RESET} <name> / {C.CYAN}setg{C.RESET} <k> <v> / {C.CYAN}globals{C.RESET}")
-        print(f"  {C.PINK}── C2 (WRAITH) ──{C.RESET}")
-        print(f"  {C.CYAN}c2{C.RESET} <serve|status|sessions|payloads|stop> — built-in WebSocket C2\n")
+        print(f"  {C.PINK}── C2 (WRAITH KERNEL) ──{C.RESET}")
+        print(f"  {C.CYAN}gen{C.RESET} <module> [k=v ...]   — build a payload / start a listener as a job")
+        print(f"  {C.CYAN}jobs{C.RESET} / {C.CYAN}kill <id>{C.RESET}          — background jobs · {C.CYAN}c2{C.RESET} <status|sessions|payloads>\n")
 
     def do_banner(self, arg): print_banner(animate=True)
     def do_clear(self, arg): os.system("cls" if os.name == "nt" else "clear")
@@ -1097,10 +1114,12 @@ class Eidolon(cmd.Cmd):
 
     def do_exit(self, arg):
         """exit / quit — leave tool"""
-        lsn = getattr(self, "_wraith_listener", None)
-        if lsn and lsn.running:
-            lsn.stop()
-            spectral("wraith listener shut down")
+        try:
+            stopped = self.jobs.shutdown_all()
+        except Exception:
+            stopped = 0
+        if stopped:
+            spectral(f"{stopped} background job(s) shut down")
         if self._subshell_active:
             self.exit_subshell(); ok("returned to Eidolon"); return False
         print(f"\n  {C.PURPLE}╰─{C.RESET} {C.CYAN}eidolon out.{C.RESET}  {C.GRAY}uptime: {_uptime_str(self.session_t0)}{C.RESET}\n")
@@ -1310,6 +1329,11 @@ class Eidolon(cmd.Cmd):
         values, payload_error = self._resolve_payload_values(values)
         if payload_error:
             return err(f"payload option rejected — {payload_error}")
+        if "--bg" in (arg or "").split() or _module_type(self.current) == MODULE_TYPE_LISTENER:
+            job = self.jobs.submit(self.current, self.current_name, values)
+            ok(f"job #{job.jid} started — {self.current_name} (background)")
+            info(f"manage: {C.CYAN}jobs{C.RESET} · stop with {C.CYAN}kill {job.jid}{C.RESET}")
+            return
         hr(C.PURPLE)
         print(f"  {C.PINK}◈{C.RESET} {C.BOLD}EXECUTING OPERATION{C.RESET}")
         print(f"  {C.SHADOW}├─{C.RESET} module : {C.PINK}{self.current_name}{C.RESET}")
@@ -1336,6 +1360,106 @@ class Eidolon(cmd.Cmd):
         warn("the framework never installs anything automatically (security)")
         info(f"install manually: {C.BOLD}pip install {' '.join(reqs)}{C.RESET}")
 
+    def do_gen(self, arg):
+        """gen <module> [key=value ...] — parameterized generation.
+        payload-type  → builds the artifact and reports what hit the store
+        listener-type → starts in the background as a managed job
+        """
+        try:
+            parts = shlex.split(arg or "")
+        except ValueError as e:
+            return err(f"parse error: {e}")
+        if not parts:
+            return err("usage: gen <module> [key=value ...]")
+        name = self._resolve(parts[0])
+        if not name or name not in self.modules:
+            return err(f"module '{parts[0]}' not found or not loaded — see: {C.CYAN}modules{C.RESET}")
+        mod = self.modules[name]
+        mtype = _module_type(mod)
+        if mtype not in (MODULE_TYPE_PAYLOAD, MODULE_TYPE_LISTENER):
+            return err(f"'{name}' is a '{mtype}' module — gen works on payload (builders) and listener modules")
+        opts = copy.deepcopy(getattr(mod, "OPTIONS", {}))
+        for tok in parts[1:]:
+            if "=" not in tok:
+                return err(f"bad parameter {tok!r} — use key=value")
+            k, _, v = tok.partition("=")
+            if k not in opts:
+                return err(f"unknown option: {k} — declared options: {', '.join(opts) or '(none)'}")
+            opts[k]["value"] = self._cast(v, opts[k].get("value"))
+        for k, v in opts.items():
+            if not (v.get("required") and v.get("value") in (None, "", [], {})):
+                continue
+            try:
+                reply = input(f"  ? {k} [{v.get('desc', '')}]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return err("aborted — missing required parameter")
+            if not reply:
+                return err(f"aborted — missing required parameter: {k}")
+            opts[k]["value"] = self._cast(reply, opts[k].get("value"))
+        values = {k: v.get("value") for k, v in opts.items()}
+        values, payload_error = self._resolve_payload_values(values, module=mod)
+        if payload_error:
+            return err(f"payload option rejected — {payload_error}")
+        if mtype == MODULE_TYPE_LISTENER:
+            job = self.jobs.submit(mod, name, values)
+            ok(f"job #{job.jid} started — {name} (background listener)")
+            info(f"manage: {C.CYAN}jobs{C.RESET} · stop with {C.CYAN}kill {job.jid}{C.RESET}")
+            return
+        try:
+            from wraith import store as wstore
+            before = set(wstore.list_payloads())
+        except ImportError:
+            before = None
+        hr(C.PURPLE)
+        print(f"  {C.PINK}◈{C.RESET} {C.BOLD}GENERATING PAYLOAD{C.RESET}")
+        print(f"  {C.SHADOW}├─{C.RESET} builder: {C.PINK}{name}{C.RESET}")
+        hr(C.PURPLE)
+        try:
+            mod.run(values)
+        except KeyboardInterrupt:
+            warn("interrupted.")
+        except Exception as e:
+            err(f"builder error: {e}")
+            if os.environ.get("EIDOLON_DEBUG"):
+                traceback.print_exc()
+            return
+        if before is not None:
+            try:
+                from wraith import store as wstore
+                for n, manifest in wstore.list_payloads().items():
+                    if n in before:
+                        continue
+                    info(f"registered payload: {C.CYAN}{n}{C.RESET} — {wstore.summary(manifest)}")
+            except ImportError:
+                pass
+        if not self._subshell_active:
+            hr(C.PURPLE)
+            ok("generation complete")
+
+    def do_jobs(self, arg):
+        """jobs — list background jobs (listeners, long-running modules)"""
+        jobs = self.jobs.all()
+        if not jobs:
+            return info("no background jobs — listener modules started with gen appear here")
+        marks = {"running": (C.GREEN, "●"), "done": (C.GRAY, "○"), "exited": (C.GRAY, "○"),
+                 "stopped": (C.GRAY, "○"), "failed": (C.RED, "✗")}
+        rows = []
+        for j in jobs:
+            color, mark = marks.get(j.status, (C.YELLOW, "○"))
+            rows.append([f"{C.PINK}#{j.jid}{C.RESET}", f"{C.CYAN}{j.name}{C.RESET}",
+                         f"{color}{mark} {j.status}{C.RESET}", _uptime_str(j.started),
+                         (j.error or "-")[:40]])
+        print_table(["ID", "Module", "Status", "Uptime", "Error"], rows, title="BACKGROUND JOBS")
+        info(f"stop one with: {C.PINK}kill <id>{C.RESET}")
+
+    def do_kill(self, arg):
+        """kill <id> — stop a background job (calls the module's stop())"""
+        token = arg.strip().lstrip("#")
+        if not token.isdigit():
+            return err("usage: kill <job id> — see: jobs")
+        okk, msg = self.jobs.kill(int(token))
+        (ok if okk else err)(msg)
+
     def _payload_specs(self, options):
         """Option specs declared as "kind": "payload" — the dedicated payload
         field. These resolve against the typed wraith store: `set KEY <ref>`
@@ -1343,11 +1467,11 @@ class Eidolon(cmd.Cmd):
         """
         return {k: v for k, v in (options or {}).items() if v.get("kind") == "payload"}
 
-    def _resolve_payload_values(self, values):
+    def _resolve_payload_values(self, values, module=None):
         """Swap every payload-kind option's raw ref (store name or path) for
         its manifest dict (+ path). Returns (values, error_or_None).
         """
-        specs = self._payload_specs(getattr(self.current, "OPTIONS", {}))
+        specs = self._payload_specs(getattr(module or self.current, "OPTIONS", {}))
         if not specs:
             return values, None
         try:
@@ -1370,8 +1494,15 @@ class Eidolon(cmd.Cmd):
         """The running wraith Listener (or None). Payload-builder modules
         read the operator profile from here: EIDOLON_SHELL.wraith_listener
         gives .url / .token / .tags of the listener that is up right now.
+        Listener modules assign themselves here at start().
         """
         return getattr(self, "_wraith_listener", None)
+
+    @wraith_listener.setter
+    def wraith_listener(self, value):
+        """Listener modules publish their operating profile: any object (or
+        simple namespace) that carries .url / .token / .tags."""
+        self._wraith_listener = value
 
     # ── WRAITH C2 subsystem ───────────────────────────────────────────────────────────
     def _c2_on_event(self, event):
@@ -1394,110 +1525,60 @@ class Eidolon(cmd.Cmd):
                 pass
 
     def do_c2(self, arg):
-        """c2 <serve|status|sessions|payloads|stop> — WebSocket C2 subsystem (Wraith)"""
+        """c2 <status|sessions|payloads> — read-only view over the C2 kernel
+        (the framework ships no listener: listener modules are started with gen)"""
         try:
             from wraith import protocol
-            from wraith.listener import Listener
             from wraith import store
+            from wraith import sessions as wsessions
         except ImportError as e:
-            return err(f"c2 subsystem unavailable: {e} — try: pip install 'websockets>=11'")
+            return err(f"c2 kernel unavailable: {e}")
 
         parts = shlex.split(arg or "")
         sub = parts[0] if parts else ""
-        rest = parts[1:]
 
         if not sub or sub == "help":
-            print(f"\n  {C.PURPLE}╭─ WRAITH C2 ────────────────────────────╮{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 serve{C.RESET} [--host H] [--port N] [--token T] [--path P] [--tls] [--cert F --key F]")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 status{C.RESET}                 \u2014 listener + session counts")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 sessions{C.RESET}               \u2014 live session table")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 payloads{C.RESET}               \u2014 list the typed payload store")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 stop{C.RESET}                    \u2014 shut the listener down")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}handshake: listener \u2194 payload must share a protocol tag (e.g. ws-json-async){C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}builders are payload MODULES (module type 'payload') — the framework ships{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}no payload sources and no compilers: the module script builds the artifact{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}in ANY language from its own sources and registers it via{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}wraith.store.register_payload(){C.RESET}{C.GRAY} \u2014 profile (url/token/tags) from{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}EIDOLON_SHELL.wraith_listener{C.RESET}{C.GRAY} whenever a listener is running{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}exploits take them through the dedicated field: declare an option with{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}\"kind\": \"payload\"{C.RESET}{C.GRAY} ({C.CYAN}\"types\": (…){C.RESET}{C.GRAY}) \u2014 validated on set, manifest dict at run{C.RESET}")
-            print(f"  {C.PURPLE}╰────────────────────────────────────────╯\n")
-            return
-
-        if sub == "serve":
-            lsn = self._wraith_listener
-            if lsn and lsn.running:
-                return warn(f"listener already running on {C.BOLD}{lsn.url}{C.RESET} — stop it first")
-            opts = {"host": "0.0.0.0", "port": None, "token": None, "path": None,
-                    "tags": None, "tls": False, "cert": None, "key": None}
-            i = 0
-            while i < len(rest):
-                a = rest[i]
-                if a in ("--host", "--port", "--token", "--path", "--cert", "--key", "--tags") and i + 1 < len(rest):
-                    opts[a[2:]] = rest[i + 1]; i += 2
-                elif a == "--tls":
-                    opts["tls"] = True; i += 1
-                else:
-                    return err(f"unknown serve option: {a!r}")
-            try:
-                lsn = Listener(
-                    host=opts["host"],
-                    port=int(opts["port"]) if opts["port"] else 0,
-                    token=opts["token"],
-                    endpoint_path=opts["path"],
-                    tls=opts["tls"],
-                    certfile=opts["cert"],
-                    keyfile=opts["key"],
-                    tags=opts["tags"].split(",") if opts["tags"] else None,
-                    on_event=self._c2_on_event,
-                )
-            except ValueError as e:
-                return err(f"bad option: {e}")
-            try:
-                lsn.start()
-            except Exception as e:
-                return err(f"listener failed to start: {e}")
-            self._wraith_listener = lsn
-            self._wraith_lock = threading.RLock()
-            if str(opts["host"]) not in ("127.0.0.1", "localhost", "::1"):
-                warn(f"listener binds {opts['host']} — anyone who reaches this interface can "
-                     f"knock on the hidden endpoint (the token stays the gate)")
-            scheme_note = " (ephemeral self-signed cert)" if (lsn.tls and not opts["cert"]) else ""
-            print(f"\n  {C.GREEN}⬢{C.RESET} {C.BOLD}listener online{C.RESET}{C.GRAY}{scheme_note}{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  url       : {C.CYAN}{lsn.url}{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  token     : {C.CYAN}{lsn.token}{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  endpoint  : {lsn.endpoint_path}")
-            print(f"  {C.PURPLE}│{C.RESET}  protocol  : {C.CYAN}{' '.join(lsn.tags)}{C.RESET} {C.GRAY}(payloads must share one tag){C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}payload builders: payload-type modules — see c2 help{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}payloads dial this URL home; connect events are reported live{C.RESET}")
-            print(f"  {C.PURPLE}╰{C.RESET}  {C.GRAY}next: {C.CYAN}c2 payloads{C.RESET}{C.GRAY} → typed store · {C.CYAN}use <payload module> run{C.RESET}{C.GRAY} → build · {C.CYAN}c2 sessions{C.RESET}{C.GRAY}\n{C.RESET}")
+            print(f"\n  {C.PURPLE}╭─ WRAITH C2 ──────────────────────────╮{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 status{C.RESET}                 — listener profile + session counts")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 sessions{C.RESET}               — live session table")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 payloads{C.RESET}               — list the typed payload store")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}listeners + builders are MODULES (module types 'listener' / 'payload'):{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}the framework ships none — write or install one, then:{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}gen <listener module> [k=v ...]{C.RESET}{C.GRAY} → background job · managed by {C.CYAN}jobs{C.RESET}{C.GRAY} / {C.CYAN}kill{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}gen <payload module>  [k=v ...]{C.RESET}{C.GRAY} → artifact lands in the typed store{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}builders read the listener profile from {C.CYAN}EIDOLON_SHELL.wraith_listener{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}tags handshake: payload and listener must share a protocol tag (4403){C.RESET}")
+            print(f"  {C.PURPLE}╰────────────────────────────{C.RESET}\n")
             return
 
         if sub == "status":
-            lsn = self._wraith_listener
-            if not lsn or not lsn.running:
-                return info(f"listener offline — start one with {C.CYAN}c2 serve{C.RESET}")
-            counts = lsn.registry.counts()
+            reg = wsessions.default_registry()
+            counts = reg.counts()
+            lsn = self.wraith_listener
             print(f"\n  {C.PURPLE}╭─ WRAITH STATUS ──────────────────────╮{C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  listener : {C.GREEN}● online{C.RESET}  {lsn.url}")
-            print(f"  {C.PURPLE}│{C.RESET}  tls      : {'wss' if lsn.tls else C.GRAY + 'off' + C.RESET}")
+            if lsn is not None:
+                tags = " ".join(getattr(lsn, "tags", ()) or ()) or "-"
+                print(f"  {C.PURPLE}│{C.RESET}  listener : {C.GREEN}● online{C.RESET}  {getattr(lsn, 'url', '?')}")
+                print(f"  {C.PURPLE}│{C.RESET}  tags     : {C.CYAN}{tags}{C.RESET} {C.GRAY}(payloads must share one){C.RESET}")
+            else:
+                print(f"  {C.PURPLE}│{C.RESET}  listener : {C.GRAY}○ none — start a listener module: {C.CYAN}gen <listener module>{C.RESET}")
+            active_jobs = len(self.jobs.active())
+            print(f"  {C.PURPLE}│{C.RESET}  jobs     : {C.CYAN}{active_jobs}{C.RESET} running · see {C.CYAN}jobs{C.RESET}")
             print(f"  {C.PURPLE}│{C.RESET}  sessions : {C.GREEN}{counts['active']}{C.RESET} active · {C.YELLOW}{counts['lost']}{C.RESET} lost · {counts['total']} total")
             print(f"  {C.PURPLE}│{C.RESET}  store    : {C.CYAN}{store.STORE_DIR}{C.RESET}")
-            print(f"  {C.PURPLE}╰──────────────────────────────────────╯\n")
+            print(f"  {C.PURPLE}╰───────────────────────────────────╰\n{C.RESET}")
             return
 
         if sub == "sessions":
-            lsn = self._wraith_listener
-            if not lsn or not lsn.running:
-                return info("listener offline.")
+            reg = wsessions.default_registry()
             rows = []
-            for s in lsn.registry.all():
+            for s in reg.all():
                 mark = f"{C.GREEN}●{C.RESET}" if s.status == "active" else f"{C.GRAY}○{C.RESET}"
                 rows.append([mark, f"{C.PINK}{s.sid[:8]}{C.RESET}", f"{s.user}@{s.host}",
                              f"{s.implant}/{s.os}-{s.arch}", s.addr,
                              _uptime_str(s.connected_at)])
             if not rows:
-                return info("no sessions yet — run a payload-type module and deliver its artifact.")
+                return info("no sessions yet — gen a listener module, then deliver an artifact.")
             print_table(["", "SID", "Identity", "Implant", "Address", "Uptime"], rows,
                         title="WRAITH SESSIONS")
             return
@@ -1505,7 +1586,7 @@ class Eidolon(cmd.Cmd):
         if sub == "payloads":
             payloads = store.list_payloads()
             if not payloads:
-                return info(f"payload store empty \u2014 a payload-type module fills it via store.register_payload()")
+                return info("payload store empty — a payload-type module fills it via store.register_payload()")
             rows = []
             for p in payloads.values():
                 rows.append([C.PINK + p["name"] + C.RESET, p.get("type", "?"),
@@ -1516,15 +1597,6 @@ class Eidolon(cmd.Cmd):
             print_table(["Name", "Type", "Protocol", "Backend", "OS/Arch", "SHA256"], rows,
                         title=f"PAYLOAD STORE · {store.STORE_DIR}")
             return
-
-        if sub == "stop":
-            lsn = self._wraith_listener
-            if not lsn or not lsn.running:
-                self._wraith_listener = None
-                return info("listener already offline.")
-            lsn.stop()
-            self._wraith_listener = None
-            return ok("listener shut down")
 
         return err(f"unknown c2 subcommand: {sub!r} — try {C.CYAN}c2{C.RESET} for help")
 
@@ -1665,6 +1737,8 @@ class Eidolon(cmd.Cmd):
         return []
 
     def complete_use(self, text, *_): return [m for m in self.modules if m.startswith(text)]
+    def complete_gen(self, text, *_): return [m for m in self.modules if m.startswith(text)]
+    def complete_kill(self, text, *_): return [str(j.jid) for j in self.jobs.all() if str(j.jid).startswith(text)]
     def complete_info(self, text, *_):
         known = list(self.modules.keys()) + list(self._untrusted.keys())
         return [m for m in known if m.startswith(text)]
