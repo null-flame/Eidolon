@@ -98,7 +98,7 @@ def list_payloads():
 
 
 def register_payload(name, artifact_path, ptype, backend=None, target_os=None,
-                     arch=None, note=None, protocol_tag=None):
+                     arch=None, note=None, protocol_tag=None, config=None):
     """Move an artifact into the store and write its typed manifest.
 
     Returns the manifest dict. Raises on a bad type or a missing artifact.
@@ -107,6 +107,10 @@ def register_payload(name, artifact_path, ptype, backend=None, target_os=None,
     dialect the artifact was built to speak so c2 payloads / any module can
     display or filter on it. The kernel never connects anything itself, so it
     never enforces a handshake.
+    `config` is the OPTIONAL build-time configuration (any dict, e.g. the
+    builder's OPTIONS values the operator set via gen/set) — carried along
+    in the manifest so exploits read the payload's setup directly from its
+    output.
     """
     if ptype not in PAYLOAD_TYPES:
         raise ValueError(
@@ -133,6 +137,7 @@ def register_payload(name, artifact_path, ptype, backend=None, target_os=None,
         "sha256": _sha256(dest),
         "note": note or "",
         "protocol": _tags_str(protocol_tag),
+        "config": dict(config) if config else {},
     }
     with open(_manifest_path(name), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
@@ -208,4 +213,7 @@ def summary(manifest):
         (f"{manifest['os']}/{manifest['arch']}" if manifest.get("os") else ""),
     ) if x)
     tail = f" ({meta})" if meta else ""
+    cfg = manifest.get("config") or {}
+    if cfg:
+        tail += (" · " if meta else " (") + f"config: {len(cfg)}" + ("" if meta else ")")
     return f"{manifest.get('name', '?')} [{mtype}]{tail}"

