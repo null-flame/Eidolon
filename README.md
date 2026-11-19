@@ -47,12 +47,12 @@ Eidolon is built on four deliberate refusals:
    enforces nothing and judges nothing.
 3. **The C2 is a separate layer.** Eidolon owns the exploit chain up to execution,
    then hands off. That layer lives in-repo as the **Wraith kernel** — a dependency-free
-   `wraith/` SDK (a session registry + a typed payload store — two files, and that is
-   all) that ships **zero servers, zero builders, zero wire contracts**: listeners and
-   payload builders are ordinary modules; everything that actually runs is an agreement
-   between two of them. The import boundary is real: `eidolon/` never imports `wraith/`,
-   exploits never speak C2, and pointing a payload at Sliver or any other C2 instead
-   remains a legitimate, first-class choice.
+   `eidolon/wraith/` subpackage (a session registry + a typed payload store — two files,
+   and that is all) that ships **zero servers, zero builders, zero wire contracts**:
+   listeners and payload builders are ordinary modules; everything that actually runs is
+   an agreement between two of them. The boundary is real: the exploit engine never
+   touches the kernel, exploits never speak C2, and pointing a payload at Sliver or any
+   other C2 instead remains a legitimate, first-class choice.
 4. **Trust is earned, never assumed.** Downloads are verified by SHA-256 when the index
    provides it, and *cannot* proceed silently when it doesn't. First run of any module is
    recorded as untrusted (TOFU — Trust On First Use).
@@ -195,7 +195,7 @@ def run(opts):
 `set payload ghost-go` fails on the spot if `ghost-go` is not one of the declared
 types — a wrong artifact can never slip into the wrong delivery path. A raw file
 path always passes (freedom) and arrives typed `"external"`. Under the hood this is
-`wraith.store.resolve_payload()`, which any module may call directly.
+`eidolon.wraith.store.resolve_payload()`, which any module may call directly.
 
 Raw operator files (any path) stay first-class: they resolve with type `"external"`
 and the module stays authoritative. Freedom by default, typing when you want it.
@@ -230,7 +230,7 @@ shipped (the packer skips `_*`, `@*`, dotfiles, and `__pycache__`).
 
 ## 👻 Wraith — the C2 kernel (modules own everything else)
 
-A minimal command-and-control **kernel** inside the repository — `wraith/` —
+A minimal command-and-control **kernel** inside the repository — `eidolon/wraith/` —
 **never imported by the exploit engine**, shipping **zero servers, zero
 listeners, zero compilers, zero wire contracts**. The kernel is just the shelves:
 a session registry and a typed payload store. Everything that runs is an ordinary
@@ -326,9 +326,10 @@ TCP/protobuf pair coexist on the same machine without the kernel ever noticing.
 ### Architecture — two small files, one folder, zero servers
 
 ```
-wraith/
-  sessions.py   thread-safe session registry (+ shared default_registry())
-  store.py      typed payload store + resolve_payload() type gateway
+eidolon/
+  wraith/
+    sessions.py   thread-safe session registry (+ shared default_registry())
+    store.py      typed payload store + resolve_payload() type gateway
 ```
 
 Listeners and builders live with the modules (`~/.eidolon/modules/whatever/`) —

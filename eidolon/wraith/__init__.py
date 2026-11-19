@@ -18,7 +18,7 @@ built to speak to it.
 
   * a LISTENER module (MODULE_TYPE "listener") starts a server with whatever
     transport and libraries it likes (ws, tcp, http, grpc, …), registers
-    sessions into wraith.sessions.default_registry(), publishes its operating
+    sessions into eidolon.wraith.sessions.default_registry(), publishes its operating
     profile through EIDOLON_SHELL.wraith_listener (url / token / tags) and
     defines stop(). A selected listener starts with `run` — it automatically
     becomes a managed background job. A module may attach an `interact`
@@ -26,7 +26,7 @@ built to speak to it.
     prompt, inner commands and TAB COMPLETION are all module business.
   * a PAYLOAD module (MODULE_TYPE "payload") is the builder: its python entry
     script compiles the artifact in ANY language, embeds whatever the payload
-    needs, and registers it via wraith.store.register_payload(...). `gen
+    needs, and registers it via eidolon.wraith.store.register_payload(...). `gen
     <module>` selects it; parameters come from `set` like any exploit; `run`
     builds and reports what hit the store.
 
@@ -38,7 +38,7 @@ Philosophy: the kernel offers the shelves; modules do everything else.
 Exploits deliver, the listener receives — on any wire they agree on.
 """
 
-__version__ = "0.4.0-c2.4"
+__version__ = "3.3.0"
 
 __all__ = ["sessions", "store"]
 
@@ -47,5 +47,5 @@ def __getattr__(name):
     if name in ("sessions", "store"):
         import importlib
 
-        return importlib.import_module(f"wraith.{name}")
-    raise AttributeError(f"module 'wraith' has no attribute '{name}'")
+        return importlib.import_module(f"eidolon.wraith.{name}")
+    raise AttributeError(f"module 'eidolon.wraith' has no attribute '{name}'")

@@ -21,4 +21,4 @@ eidolon = "eidolon.cli:main"
 "Homepage" = "https://github.com/null-flame/Eidolon" # آدرس مخزن خودت
 
 [tool.setuptools.packages.find]
-include = ["eidolon*", "wraith*"]
+include = ["eidolon*"]

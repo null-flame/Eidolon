@@ -110,7 +110,7 @@ THE DEDICATED PAYLOAD FIELD (typed store, type-checked on set):
   `"kind": "payload"` + `"types": (...)` in OPTIONS — `set payload <ref>`
   resolves LIVE against the store; run() receives a manifest DICT with
   "path" inside. Raw paths pass as type "external". Under the hood:
-  wraith.store.resolve_payload().
+  eidolon.wraith.store.resolve_payload().
 
 INTERACTIVE SHELL AFTER BREAK-IN (optional): hand the console to your own
   shell — EIDOLON_SHELL.enter_subshell(handler, completer=fn, prompt_fn=fn,
@@ -234,7 +234,7 @@ __NAME__ — EXPLOIT module — developer field guide
   در OPTIONS اعلان کن `"kind": "payload"` + `"types": (...)`؛ `set payload`
   همان لحظه روی انبار resolve می‌شود و run() یک مانیفست DICT با "path"
   می‌گیرد. مسیر خام با تایپ "external" می‌گذرد. زیرش:
-  wraith.store.resolve_payload() — مستقیم هم صداپذیر.
+  eidolon.wraith.store.resolve_payload() — مستقیم هم صداپذیر.
 
 شل تعاملی بعد از ورود (اختیاری): کنسول را به شلِ خودت بسپار —
   EIDOLON_SHELL.enter_subshell(handler, completer=fn, prompt_fn=fn, on_exit=fn)
@@ -351,7 +351,7 @@ known; dirs starting with "_" / "." stay invisible to the scanner).
 THE FOUR MOVES (recipes inside run() below):
   1 SERVE    — start your server; knobs come from OPTIONS (port/host/tls…).
   2 PROFILE  — publish: EIDOLON_SHELL.wraith_listener = <obj with .url/.token/.tags>
-  3 SESSIONS — after a handshake: wraith.sessions.default_registry().register(...)
+  3 SESSIONS — after a handshake: eidolon.wraith.sessions.default_registry().register(...)
                + sess.interact = self.interact + EIDOLON_SHELL._c2_on_event(("up", sess))
   4 INTERACT — when the operator types `use <sid>` the console calls
                sess.interact(EIDOLON_SHELL): inside you own EVERYTHING —
@@ -405,7 +405,7 @@ class _Listener:
     def start(self):
         # TODO: start the real server (thread/asyncio — your rules).
         # After an implant handshakes at, e.g., 10.4.2.9:51515:
-        #   from wraith import sessions
+        #   from eidolon.wraith import sessions
         #   reg   = sessions.default_registry()          # or a private one
         #   sess  = reg.register({"sid": uuid, "implant": "my-implant",
         #                         "os": "linux", "arch": "x86_64",
@@ -500,7 +500,7 @@ __NAME__ — LISTENER module — developer field guide
 چهار حرکت (دستورالعمل داخل run() پایین):
   1 SERVE    — سرورت؛ تنظیمات از OPTIONS (port/host/tls…).
   2 PROFILE  — انتشار پروفایل: EIDOLON_SHELL.wraith_listener = <شیء با .url/.token/.tags>
-  3 SESSIONS — بعد از دست‌دادن: wraith.sessions.default_registry().register(...)
+  3 SESSIONS — بعد از دست‌دادن: eidolon.wraith.sessions.default_registry().register(...)
                + sess.interact = self.interact + EIDOLON_SHELL._c2_on_event(("up", sess))
   4 INTERACT — اپراتور `use <sid>` بزند، کنسول sess.interact(EIDOLON_SHELL)
                را صدا می‌زند و از آن لحظه همه‌چیز دستِ توست:
@@ -555,7 +555,7 @@ class _Listener:
     def start(self):
         # TODO: start the real server (thread/asyncio — your rules).
         # After an implant handshakes at, e.g., 10.4.2.9:51515:
-        #   from wraith import sessions
+        #   from eidolon.wraith import sessions
         #   reg   = sessions.default_registry()          # or a private one
         #   sess  = reg.register({"sid": uuid, "implant": "my-implant",
         #                         "os": "linux", "arch": "x86_64",
@@ -655,7 +655,7 @@ THE BUILD (inside run(opts)):
   2. listener profile: lsn = EIDOLON_SHELL.wraith_listener (.url/.token/.tags)
      — embed it so the implant knows where to phone home.
   3. read raw sources, substitute the profile, compile however you like.
-  4. REGISTER: wraith.store.register_payload(name, artifact, ptype=…,
+  4. REGISTER: eidolon.wraith.store.register_payload(name, artifact, ptype=…,
      backend=…, target_os=…, arch=…, protocol_tag=… — a free metadata label)
   `run` then reports "registered payload: <name> — <summary>" automatically.
 
@@ -718,7 +718,7 @@ def run(opts):
     os.chmod(out, 0o600)
 
     # -- 3. REGISTER — this is what puts it on the operator's radar -----------
-    from wraith import store
+    from eidolon.wraith import store
     manifest = store.register_payload(
         name, out, ptype="file-posix", backend="sh", target_os=target,
         arch=arch, note="built by __NAME__ scaffold",
@@ -767,7 +767,7 @@ __eidolon_path__ حل کن).
   2. پروفایل لیسنر: lsn = EIDOLON_SHELL.wraith_listener (.url/.token/.tags)
      — امبدش کن تا ایمپلنت بداند کجا زنگ بزند.
   3. سورس خام را بخوان، پروفایل را جانشین کن، هرطور خواستی کامپایل کن.
-  4. ثبت: wraith.store.register_payload(name, artifact, ptype=…, backend=…,
+  4. ثبت: eidolon.wraith.store.register_payload(name, artifact, ptype=…, backend=…,
      target_os=…, arch=…, protocol_tag=… — فراداده‌ی آزاد)
   بعد از run خودش گزارش می‌دهد: "registered payload: <name> — <خلاصه>".
 
@@ -830,7 +830,7 @@ def run(opts):
     os.chmod(out, 0o600)
 
     # -- 3. REGISTER — this is what puts it on the operator's radar -----------
-    from wraith import store
+    from eidolon.wraith import store
     manifest = store.register_payload(
         name, out, ptype="file-posix", backend="sh", target_os=target,
         arch=arch, note="built by __NAME__ scaffold",
@@ -2195,7 +2195,7 @@ class Eidolon(cmd.Cmd):
         Returns "handled" when the console was handed over/errored.
         """
         try:
-            from wraith import sessions as wsessions
+            from eidolon.wraith import sessions as wsessions
         except ImportError:
             return None
         try:
@@ -2260,7 +2260,7 @@ class Eidolon(cmd.Cmd):
         spec = self.current_options[key]
         if spec.get("kind") == "payload" and str(val).strip():
             try:
-                from wraith import store
+                from eidolon.wraith import store
                 _, manifest = store.resolve_payload(str(spec["value"]), kinds=spec.get("types") or None)
             except ImportError as e:
                 self.current_options[key]["value"] = old
@@ -2299,7 +2299,7 @@ class Eidolon(cmd.Cmd):
         mtype = _module_type(self.current)
         if mtype == MODULE_TYPE_PAYLOAD:
             try:
-                from wraith import store as wstore
+                from eidolon.wraith import store as wstore
                 before = set(wstore.list_payloads())
             except ImportError:
                 before = None
@@ -2321,7 +2321,7 @@ class Eidolon(cmd.Cmd):
             hr(C.PURPLE); ok("operation complete")
         if mtype == MODULE_TYPE_PAYLOAD and before is not None:
             try:
-                from wraith import store as wstore
+                from eidolon.wraith import store as wstore
                 for n, manifest in wstore.list_payloads().items():
                     if n in before:
                         continue
@@ -2400,7 +2400,7 @@ class Eidolon(cmd.Cmd):
         if not specs:
             return values, None
         try:
-            from wraith import store
+            from eidolon.wraith import store
         except ImportError as e:
             return values, f"payload subsystem unavailable: {e}"
         for key, meta in specs.items():
@@ -2453,8 +2453,8 @@ class Eidolon(cmd.Cmd):
         """c2 <status|sessions|payloads> — read-only view over the C2 kernel
         (the framework ships no listener: listener modules are started with gen)"""
         try:
-            from wraith import store
-            from wraith import sessions as wsessions
+            from eidolon.wraith import store
+            from eidolon.wraith import sessions as wsessions
         except ImportError as e:
             return err(f"c2 kernel unavailable: {e}")
 
@@ -2671,7 +2671,7 @@ class Eidolon(cmd.Cmd):
     def complete_use(self, text, *_):
         hits = [m for m in self.modules if m.startswith(text)]
         try:
-            from wraith import sessions as wsessions
+            from eidolon.wraith import sessions as wsessions
             hits += [s.sid for s in wsessions.default_registry().active()
                      if s.sid.startswith(text)]
         except Exception:
@@ -2683,6 +2683,19 @@ class Eidolon(cmd.Cmd):
                 if m.startswith(text)
                 and _module_type(self.modules[m]) in (MODULE_TYPE_PAYLOAD, MODULE_TYPE_LISTENER)]
     def complete_kill(self, text, *_): return [str(j.jid) for j in self.jobs.all() if str(j.jid).startswith(text)]
+    def complete_c2(self, text, line, begidx, endidx):
+        parts = line.split()
+        if len(parts) <= 1:
+            return [x for x in ("status", "sessions", "payloads") if x.startswith(text)]
+        return []
+    def complete_deps(self, text, line, begidx, endidx):
+        if len(line.split()) <= 1:
+            return [m for m in self.modules if m.startswith(text)]
+        return []
+    def complete_show(self, text, line, begidx, endidx):
+        if len(line.split()) <= 1:
+            return [x for x in ("options", "modules") if x.startswith(text)]
+        return []
     def complete_info(self, text, *_):
         known = list(self.modules.keys()) + list(self._untrusted.keys())
         return [m for m in known if m.startswith(text)]
@@ -2691,7 +2704,7 @@ class Eidolon(cmd.Cmd):
     def complete_help(self, text, *_):
         cmds = ["help","banner","clear","reload","exit","modules","ls","search","info","use","back",
                 "options","set","unset","run","sessions","deps","new_module","add_module","install_local","remove",
-                "setg","globals","status","repo",
+                "setg","globals","status","repo","c2",
                 "trust","untrust","trusted","verify"]
         return [x for x in cmds if x.startswith(text)]
 
