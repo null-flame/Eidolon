@@ -9,12 +9,30 @@ run(values) in a daemon thread; two conventions make management possible:
   * an optional stop() hook on the module lets `kill <id>` shut the engine
     down cleanly. Without it, a job can only end on its own.
 
+Async is FIRST-CLASS: an `async def run(opts)` is executed natively on a
+event loop inside the worker thread (invoke() below handles sync and async
+alike) — an async listener needs no thread/loop ceremony of its own.
+
 The framework never touches the module's internals — start, list, stop; that
 is the whole contract.
 """
 
+import asyncio
+import inspect
 import threading
 import time
+
+
+def invoke(run, values):
+    """Run one module run() — sync blocks as usual; an `async def run` (or a
+    run() returning a coroutine) is awaited on a fresh event loop. Both are
+    first-class; async is the preferred style for network engines."""
+    if inspect.iscoroutinefunction(run):
+        return asyncio.run(run(values))
+    out = run(values)
+    if inspect.iscoroutine(out):
+        return asyncio.run(out)
+    return out
 
 
 class Job:
@@ -51,7 +69,7 @@ class JobManager:
 
         def worker():
             try:
-                module.run(values)
+                invoke(module.run, values)
             except Exception as e:
                 job.error = str(e)
                 job.status = "failed"

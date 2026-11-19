@@ -10,15 +10,19 @@ MODULE_TYPE_GENERIC   = "generic"
 MODULE_TYPE_EXPLOIT   = "exploit"
 MODULE_TYPE_PAYLOAD   = "payload"
 MODULE_TYPE_LISTENER  = "listener"
+MODULE_TYPE_POST      = "post-exploit"
 
 VALID_MODULE_TYPES = {MODULE_TYPE_AUXILIARY, MODULE_TYPE_GENERIC, MODULE_TYPE_EXPLOIT,
-                      MODULE_TYPE_PAYLOAD, MODULE_TYPE_LISTENER}
+                      MODULE_TYPE_PAYLOAD, MODULE_TYPE_LISTENER, MODULE_TYPE_POST}
 _MODULE_TYPE_ALIASES = {
     "aux": MODULE_TYPE_AUXILIARY, "auxiliary": MODULE_TYPE_AUXILIARY,
     "generic": MODULE_TYPE_GENERIC, "public": MODULE_TYPE_GENERIC,
     "exploit": MODULE_TYPE_EXPLOIT, "exp": MODULE_TYPE_EXPLOIT,
     "payload": MODULE_TYPE_PAYLOAD, "c2": MODULE_TYPE_PAYLOAD,
     "listener": MODULE_TYPE_LISTENER, "server": MODULE_TYPE_LISTENER,
+    "post": MODULE_TYPE_POST, "post-ex": MODULE_TYPE_POST,
+    "post-exploit": MODULE_TYPE_POST, "postexploit": MODULE_TYPE_POST,
+    "post-exploitation": MODULE_TYPE_POST,
 }
 
 WORKSPACE_DIR = os.path.join(os.path.expanduser("~"), ".eidolon")
@@ -28,6 +32,7 @@ TRUST_FILE    = os.path.join(WORKSPACE_DIR, "trust.json")
 
 def _module_type(mod) -> str:
     raw = str(getattr(mod, "MODULE_TYPE", "") or "").strip().lower()
+    raw = raw.replace("_", "-")
     return _MODULE_TYPE_ALIASES.get(raw, MODULE_TYPE_GENERIC)
 
 
