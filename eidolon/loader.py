@@ -8,12 +8,15 @@ from eidolon.utils import spectral, err, warn, sha256_of_path, sha256_of_dir
 MODULE_TYPE_AUXILIARY = "auxiliary"
 MODULE_TYPE_GENERIC   = "generic"
 MODULE_TYPE_EXPLOIT   = "exploit"
+MODULE_TYPE_PAYLOAD   = "payload"
 
-VALID_MODULE_TYPES = {MODULE_TYPE_AUXILIARY, MODULE_TYPE_GENERIC, MODULE_TYPE_EXPLOIT}
+VALID_MODULE_TYPES = {MODULE_TYPE_AUXILIARY, MODULE_TYPE_GENERIC, MODULE_TYPE_EXPLOIT,
+                      MODULE_TYPE_PAYLOAD}
 _MODULE_TYPE_ALIASES = {
     "aux": MODULE_TYPE_AUXILIARY, "auxiliary": MODULE_TYPE_AUXILIARY,
     "generic": MODULE_TYPE_GENERIC, "public": MODULE_TYPE_GENERIC,
     "exploit": MODULE_TYPE_EXPLOIT, "exp": MODULE_TYPE_EXPLOIT,
+    "payload": MODULE_TYPE_PAYLOAD, "c2": MODULE_TYPE_PAYLOAD,
 }
 
 WORKSPACE_DIR = os.path.join(os.path.expanduser("~"), ".eidolon")
