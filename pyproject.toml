@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eidolon-core"  # نامی که در PyPI ثبت می‌شود
-version = "3.2.1"       # نسخه را برای هر آپلود جدید تغییر بده
+version = "3.2.2"       # نسخه را برای هر آپلود جدید تغییر بده
 description = "Eidolon Spectral Core Framework"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MPL 2.0"} # نوع لایسنس را مشخص کن
 authors = [{name = "null-flame"}]
 dependencies = [
-    "zstandard>=0.20.0"
+    "zstandard>=0.20.0",
+    "websockets>=11.0"
 ]
 
 [project.scripts]
@@ -21,4 +22,4 @@ eidolon = "eidolon.cli:main"
 "Homepage" = "https://github.com/null-flame/Eidolon" # آدرس مخزن خودت
 
 [tool.setuptools.packages.find]
-include = ["eidolon*"]
+include = ["eidolon*", "wraith*"]
