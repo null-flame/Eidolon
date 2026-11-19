@@ -66,7 +66,9 @@ Optional metadata the CLI displays (delete what you do not need):
   NAME, VERSION, DESCRIPTION, CATEGORY, MODULE_TYPE, AUTHOR, PAYLOAD_KIND
   MODULE_TYPE: "auxiliary" | "generic" | "exploit"  (exploit modules get session logging)
 
-PAYLOAD CHANNELS (for exploit modules — pick what your bug provides):
+SUGGESTED PAYLOAD PATTERNS — purely advisory, NOT a contract. Modules are free:
+do literally anything in run() (raw sockets, several stages, one-liners, custom
+files). These are only common shapes other authors found useful:
   * SHELLCODE_PATH — raw position-independent shellcode file. arch / badchars /
                      max size are YOUR bug's constraints — validate them in run().
   * PAYLOAD_FILE   — executable artifact dropped or uploaded on the target (exe/elf/so/dll).
