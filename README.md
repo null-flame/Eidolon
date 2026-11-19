@@ -47,7 +47,7 @@ Eidolon is built on four deliberate refusals:
    enforces nothing and judges nothing.
 3. **The C2 is a separate layer.** Eidolon owns the exploit chain up to execution,
    then hands off. Since 3.2.2 that layer ships *inside the framework* as **Wraith**
-   (a self-contained `wraith/` package: async WebSocket listener + payload builder +
+   (a self-contained `wraith/` package: async WebSocket listener +
    typed payload store) — but the import boundary is real: `eidolon/` never imports
    `wraith/`, exploits never speak C2, and pointing a payload at Sliver or any other
    C2 instead remains a legitimate, first-class choice.
@@ -173,21 +173,28 @@ This keeps Eidolon agnostic about C2s: point `CMD` at Sliver's implant generator
 built-in **Wraith** listener (below), at a WebSocket listener, at whatever comes next —
 the module just delivers it.
 
-### Payload integration with the built-in C2 (optional)
+### Payload integration with the built-in C2 — the dedicated `payload` field
 
-Payloads built with `c2 build` carry a **type** and a wire **protocol tag**. A module
-that wants a payload resolves it through the typed store — mismatched types are
-refused, wrong-protocol artifacts never even build:
+Payloads in the store carry a **type** and a wire **protocol tag**. An exploit asks
+for one by declaring a single dedicated option field — the framework validates on
+`set`, filters by type, and hands `run()` the resolved manifest instead of a string:
 
 ```python
-OPTIONS = {"PAYLOAD": {"value": "", "required": False,
-                       "desc": "payload name from `c2 payloads`, or any raw file path"}}
+OPTIONS = {"payload": {"value": "", "required": False,
+                       "desc":  "payload name from `c2 payloads`, or any raw file path",
+                       "kind":  "payload",                 # framework-managed field
+                       "types": ("file-posix", "file-win")}}
 
 def run(opts):
-    from wraith import store
-    path, manifest = store.resolve_payload(opts.get("PAYLOAD"), kinds=("file-posix",))
-    # manifest["type"] == "file-posix" — guaranteed by the store
-    # manifest["protocol"] == "ws-json-async" — the artifact dials a matching listener
+    artifact = opts["payload"]["path"]          # ready to deliver
+    opts["payload"]["type"]                   # "file-posix" — the store guarantees it
+    opts["payload"]["protocol"]               # "ws-json-async" — its wire dialect
+```
+
+`set payload ghost-go` fails on the spot if `ghost-go` is not one of the declared
+types — a wrong artifact can never slip into the wrong delivery path. A raw file
+path always passes (freedom) and arrives typed `"external"`. Under the hood this is
+`wraith.store.resolve_payload()`, which any module may call directly.
 ```
 
 Raw operator files (any path) stay first-class: they resolve with type `"external"`
@@ -230,8 +237,12 @@ self-contained package — `wraith/` — **never imported by the exploit engine*
   non-blocking task multiplexing
 - **JSON wire protocol** — one object per frame, spec + validation in
   `wraith/protocol.py`
-- **Payload builder** — Go and Nim backends, the listener profile (URL + token)
-  *hardcoded into the binary* at compile time — zero runtime configuration
+- **Builders are modules, not framework code** — the repository ships **zero**
+  payload sources and **zero** compilers. A payload builder is simply a module of
+  type `payload`: its sources sit beside the module script, the script produces
+  the artifact in *any* language it pleases (Go, Nim, C, Rust, C#, bash, python,
+  PowerShell…), embeds the listener profile (URL + token + tags) however it
+  likes, and registers it in the store — exploits pick it up by name, type-filtered.
 - **Typed payload store** — every artifact labeled (file-posix / file-win /
   shellcode / cmd / code) with a SHA-256 manifest
 - **Protocol-tag handshake** — listener and payload must share a wire-dialect tag
@@ -241,8 +252,8 @@ self-contained package — `wraith/` — **never imported by the exploit engine*
 
 ```
 eidolon ❯ c2 serve                      ⬢ listener online (async + hidden endpoint)
-eidolon ❯ c2 build                      ⬢ wraith-go compiled — URL+token embedded
-                                        ⬢ stored: my-payload [file-posix] · ws-json-async
+eidolon ❯ use ghost-implant             (a payload-type module — builds + registers)
+eidolon ❯ run                            ⬢ stored: ghost-go [file-posix] · ws-json-async
 ... exploit module delivers the binary to the target ...
   ⬢ payload connected  5f8e12c2 · alice@corp-ws · go/linux-amd64 · 10.4.2.9:51515
 eidolon ❯ c2 sessions                   (live table — ● active, ○ lost)
@@ -258,7 +269,6 @@ target user, host, implant flavor and address.
 | `c2 serve [--host H] [--port N] [--token T] [--path P] [--tags T1,T2] [--tls]` | bring the listener up — token + random `/api/v2/streams/<hex>` endpoint auto-generated; wrong token/path = instant `4401` drop |
 | `c2 status` | listener state, protocol tags, session counts |
 | `c2 sessions` | live session table (active / lost) |
-| `c2 build [go\|nim] [name] [--os X] [--arch Y]` | compile a payload with the listener profile embedded, store it typed |
 | `c2 payloads` | the typed payload store (name · type · protocol · backend · sha256) |
 | `c2 stop` | clean shutdown (also happens automatically on `exit`) |
 
@@ -266,8 +276,9 @@ target user, host, implant flavor and address.
 
 Every listener announces the wire dialects it speaks; every payload announces the
 ones it understands. **They connect only on a common tag** — otherwise the
-handshake dies with close code `4403` (and a payload compiled for a foreign
-dialect is refused by the builder at *build* time, before it ever exists):
+handshake dies with close code `4403` (and a payload registered under a foreign
+dialect simply never matches an exploit's store filter — the wrong pairing
+cannot happen by accident):
 
 ```
   listener: tags = {ws-json-async}          (c2 serve --tags a,b — any count)
@@ -280,7 +291,7 @@ future dialect (`ws-framed-binary`, …) can coexist with the old one on the sam
 box without a single misconnected implant. Remote indexes can pin the dialect of
 a published module with the optional `"protocol"` / `"payload_type"` fields.
 
-### Architecture — six small files, one folder
+### Architecture — four small files, one folder
 
 ```
 wraith/
@@ -288,10 +299,11 @@ wraith/
   sessions.py   thread-safe session registry (identity, state, result history)
   listener.py   the async listener — auth (token ∩ path), TLS (self-minted cert
                 or yours), chunked file reassembly, pty plumbing, event feed
-  builder.py    backend profiles → compiled artifacts with embedded config
   store.py      typed payload store + resolve_payload() type gateway
-  payloads/     backends: go/ (full-featured, pty, reconnect) + nim/ (core)
 ```
+
+Builders live with the modules (`~/.eidolon/modules/<builder>/`) — outside the
+framework, exactly where a payload author wants them.
 
 New dependency: `websockets>=11`. TLS is optional (`cryptography` mints an
 ephemeral self-signed certificate when you don't bring one). Uploaded/downloaded
@@ -426,8 +438,8 @@ between runs.
   are being landed as automated tests)
 - `ENFORCE_SHA256 = True` — hard-block hashless archives in an upcoming release
 - **Wraith** — ✅ shipped in 3.2.2: the C2 subsystem now lives in-repo (async
-  WebSocket/JSON listener, embedded-profile payload builder, typed payload store,
-  protocol-tag handshake). Next: backend profiles beyond Go/Nim, session persistence
+  WebSocket/JSON listener, typed payload store, protocol-tag handshake,
+  builders as payload modules). Next: session persistence
 
 ---
 

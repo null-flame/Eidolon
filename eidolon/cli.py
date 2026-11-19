@@ -75,8 +75,12 @@ MODULE TYPES (MODULE_TYPE — one of):
               force, DoS tests, parsers. Attacks nothing directly.
   exploit   : the weapon delivery — gains initial code execution, takes a
               payload (optional!). Gets automatic session logging in the DB.
-  payload   : C2 glue — launches/registers payloads built by `c2 build`,
-              talks to wraith (see PAYLOAD INTEGRATION below).
+  payload   : the payload BUILDER — the framework ships no payload sources
+              and no compilers: THIS module owns them. Its sources sit beside
+              the script; the script builds the artifact in any language
+              (go, nim, c, rust, c#, bash, python, powershell, …) with the
+              listener profile embedded and registers it in the typed store
+              (see PAYLOAD INTEGRATION below).
   generic   : everything else (encode/convert/package/report — non-attack helpers).
 
 METADATA the CLI displays in `info` / `modules` / remote indexes:
@@ -94,22 +98,37 @@ PAYLOAD FREEDOM (the deepest rule of Eidolon):
                     from a URL. You own the quoting and escaping.
     PAYLOAD_SRC     source an interpreter on the target executes.
 
-PAYLOAD INTEGRATION with the built-in C2 (wraith) — optional, waiting for you:
-  payloads built with `c2 build` are stored TYPE-LABELED and PROTOCOL-TAGGED.
-  `resolve_payload` refuses a payload whose type does not fit your delivery, so
-  a wrong artifact can never slip into the wrong path:
+PAYLOAD INTEGRATION with the built-in C2 (wraith) — the dedicated field:
+  EXPLOIT side — declare one option and the framework does the bookkeeping:
 
-      def _payload(opts, kinds=("file-posix",)):
-          # resolve opts["PAYLOAD"] = store name OR any raw file path
-          ref = opts.get("PAYLOAD")
-          if not ref:
-              return None, None               # module runs payload-less too
-          from wraith import store
-          return store.resolve_payload(ref, kinds=kinds)
+      OPTIONS = {
+          "payload": {"value": "", "required": False,
+                      "desc":  "payload name from `c2 payloads`, or a raw path",
+                      "kind":  "payload",                    # framework-managed
+                      "types": ("file-posix",)},             # accepted types
+      }
 
-  In run():  path, manifest = _payload(opts)
-             # manifest["type"] e.g. "file-posix", manifest["protocol"]
-             # e.g. "ws-json-async" — the wire dialect the artifact dials home.
+  `set payload ghost-go` resolves LIVE against the typed store — a payload
+  whose type is outside `types` is refused on the spot. At run() the value is
+  already a manifest DICT (raw ref string never reaches you):
+
+      def run(opts):
+          payload = opts.get("payload")            # None when unset
+          if payload:
+              artifact = payload["path"]           # ready to deliver
+              # payload["type"], ["protocol"], ["sha256"], ["name"] …
+  A raw file path always passes as type "external" — freedom stays total.
+
+  PAYLOAD-BUILDER side (type "payload") — build ANY language and register:
+
+      lsn = EIDOLON_SHELL.wraith_listener          # url / token / tags
+      # compile/produce your artifact with lsn.url + lsn.token embedded, then:
+      from wraith import store
+      store.register_payload("ghost-go", artifact, ptype="file-posix",
+                             backend="go", target_os="linux", arch="x86_64",
+                             note="compiled by ghost-implant module",
+                             protocol_tag="ws-json-async")
+  `c2 payloads` lists it; exploits pick it by name — type-filtered.
 
 INJECTED BY THE FRAMEWORK (available inside run, zero setup):
   opts              {KEY: value} — resolved option values (strings)
@@ -164,11 +183,13 @@ OPTIONS = {
         "required": False,
         "desc":     "print every step",
     },
-    # example payload option for exploit/payload modules — uncomment if relevant:
-    # "PAYLOAD": {
+    # dedicated payload field for exploit/payload modules — uncomment if relevant:
+    # "payload": {
     #     "value":    "",
     #     "required": False,
-    #     "desc":     "payload name from `c2 payloads`, or any raw file path",
+    #     "desc":     "payload name from `c2 payloads`, or a raw file path",
+    #     "kind":     "payload",                 # framework-managed: validated
+    #     "types":    ("file-posix",),           # on set, manifest dict at run
     # },
 }
 
@@ -197,14 +218,12 @@ def run(opts):
     if not target:
         return err("target is empty — set it with: set target <value>")
 
-    # ── 2. (exploit/payload modules) resolve a typed payload, if any ────────
-    # payload = None
-    # if opts.get("PAYLOAD"):
-    #     from wraith import store
-    #     payload, manifest = store.resolve_payload(
-    #         opts["PAYLOAD"], kinds=("file-posix",))
-    #     if verbose:
-    #         info(f"payload: {store.summary(manifest)}")
+    # ── 2. (exploit/payload modules) the dedicated payload field ───────────
+    # `kind: "payload"` options arrive as a manifest DICT with "path" inside;
+    # raw file paths pass as type "external". Nothing to resolve by hand here.
+    # payload = opts.get("payload")
+    # if payload and verbose:
+    #     info(f"payload: {payload['name']} [{payload['type']}]")
 
     # ── 3. the actual work — network calls carry timeouts, errors are non-fatal ──
     try:
@@ -1047,7 +1066,7 @@ class Eidolon(cmd.Cmd):
         print(f"  {C.CYAN}install_local{C.RESET} <src> [dest] [--force]")
         print(f"  {C.CYAN}remove{C.RESET} <name> / {C.CYAN}setg{C.RESET} <k> <v> / {C.CYAN}globals{C.RESET}")
         print(f"  {C.PINK}── C2 (WRAITH) ──{C.RESET}")
-        print(f"  {C.CYAN}c2{C.RESET} <serve|status|sessions|build|payloads|stop> — built-in WebSocket C2\n")
+        print(f"  {C.CYAN}c2{C.RESET} <serve|status|sessions|payloads|stop> — built-in WebSocket C2\n")
 
     def do_banner(self, arg): print_banner(animate=True)
     def do_clear(self, arg): os.system("cls" if os.name == "nt" else "clear")
@@ -1180,8 +1199,8 @@ class Eidolon(cmd.Cmd):
         print(f"  {C.PURPLE}╰────────────────────────────────────╯")
         opts = getattr(m, "OPTIONS", {})
         if opts:
-            rows = [[k, str(v.get("value", "")), "yes" if v.get("required") else "no", v.get("desc", "")] for k, v in opts.items()]
-            print_table(["Name", "Default", "Req", "Desc"], rows, title="OPTIONS")
+            rows = [[k, str(v.get("value", "")), "yes" if v.get("required") else "no", v.get("kind", ""), v.get("desc", "")] for k, v in opts.items()]
+            print_table(["Name", "Default", "Req", "Kind", "Desc"], rows, title="OPTIONS")
         reqs = [str(r) for r in (getattr(m, "REQUIREMENTS", None) or [])]
         if reqs:
             missing = _missing_requirements(reqs)
@@ -1222,8 +1241,8 @@ class Eidolon(cmd.Cmd):
         if not self.current: return err("no module selected.")
         opts = self.current_options or {}
         if not opts: return info("no options.")
-        rows = [[k, str(v.get("value", "")), "yes" if v.get("required") else "no", v.get("desc", "")] for k, v in opts.items()]
-        print_table(["Name", "Value", "Req", "Desc"], rows, title=f"OPTIONS · {self.current_name}")
+        rows = [[k, str(v.get("value", "")), "yes" if v.get("required") else "no", v.get("kind", ""), v.get("desc", "")] for k, v in opts.items()]
+        print_table(["Name", "Value", "Req", "Kind", "Desc"], rows, title=f"OPTIONS · {self.current_name}")
 
     def do_show(self, arg):
         a = arg.strip().lower()
@@ -1252,6 +1271,19 @@ class Eidolon(cmd.Cmd):
         if key not in self.current_options: return err(f"unknown option: {key}")
         old = self.current_options[key].get("value")
         self.current_options[key]["value"] = self._cast(val, old)
+        spec = self.current_options[key]
+        if spec.get("kind") == "payload" and str(val).strip():
+            try:
+                from wraith import store
+                _, manifest = store.resolve_payload(str(spec["value"]), kinds=spec.get("types") or None)
+            except ImportError as e:
+                self.current_options[key]["value"] = old
+                return err(f"payload subsystem unavailable: {e}")
+            except ValueError as e:
+                self.current_options[key]["value"] = old
+                return err(f"payload rejected — {e}")
+            ok(f"{C.CYAN}{key}{C.RESET} → {spec['value']!r}  ({store.summary(manifest)})")
+            return
         ok(f"{C.CYAN}{key}{C.RESET} → {self.current_options[key]['value']!r}")
 
     def do_unset(self, arg):
@@ -1275,6 +1307,9 @@ class Eidolon(cmd.Cmd):
         if missing: return err(f"missing required: {', '.join(missing)}")
 
         values = {k: v.get("value") for k, v in self.current_options.items()}
+        values, payload_error = self._resolve_payload_values(values)
+        if payload_error:
+            return err(f"payload option rejected — {payload_error}")
         hr(C.PURPLE)
         print(f"  {C.PINK}◈{C.RESET} {C.BOLD}EXECUTING OPERATION{C.RESET}")
         print(f"  {C.SHADOW}├─{C.RESET} module : {C.PINK}{self.current_name}{C.RESET}")
@@ -1301,6 +1336,43 @@ class Eidolon(cmd.Cmd):
         warn("the framework never installs anything automatically (security)")
         info(f"install manually: {C.BOLD}pip install {' '.join(reqs)}{C.RESET}")
 
+    def _payload_specs(self, options):
+        """Option specs declared as "kind": "payload" — the dedicated payload
+        field. These resolve against the typed wraith store: `set KEY <ref>`
+        validates live, run() receives a manifest dict with a "path" key.
+        """
+        return {k: v for k, v in (options or {}).items() if v.get("kind") == "payload"}
+
+    def _resolve_payload_values(self, values):
+        """Swap every payload-kind option's raw ref (store name or path) for
+        its manifest dict (+ path). Returns (values, error_or_None).
+        """
+        specs = self._payload_specs(getattr(self.current, "OPTIONS", {}))
+        if not specs:
+            return values, None
+        try:
+            from wraith import store
+        except ImportError as e:
+            return values, f"payload subsystem unavailable: {e}"
+        for key, meta in specs.items():
+            ref = str(values.get(key) or "").strip()
+            if not ref:
+                continue
+            try:
+                path, manifest = store.resolve_payload(ref, kinds=meta.get("types") or None)
+            except ValueError as e:
+                return values, f"{key}: {e}"
+            values[key] = dict(manifest, path=path)
+        return values, None
+
+    @property
+    def wraith_listener(self):
+        """The running wraith Listener (or None). Payload-builder modules
+        read the operator profile from here: EIDOLON_SHELL.wraith_listener
+        gives .url / .token / .tags of the listener that is up right now.
+        """
+        return getattr(self, "_wraith_listener", None)
+
     # ── WRAITH C2 subsystem ───────────────────────────────────────────────────────────
     def _c2_on_event(self, event):
         kind, sess = event
@@ -1322,10 +1394,9 @@ class Eidolon(cmd.Cmd):
                 pass
 
     def do_c2(self, arg):
-        """c2 <serve|status|sessions|build|payloads|stop> — WebSocket C2 subsystem (Wraith)"""
+        """c2 <serve|status|sessions|payloads|stop> — WebSocket C2 subsystem (Wraith)"""
         try:
             from wraith import protocol
-            from wraith.builder import available as toolchains, build as build_payload, payload_type, output_name
             from wraith.listener import Listener
             from wraith import store
         except ImportError as e:
@@ -1340,12 +1411,16 @@ class Eidolon(cmd.Cmd):
             print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 serve{C.RESET} [--host H] [--port N] [--token T] [--path P] [--tls] [--cert F --key F]")
             print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 status{C.RESET}                 \u2014 listener + session counts")
             print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 sessions{C.RESET}               \u2014 live session table")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 build{C.RESET} [go|nim] [name] [--os X] [--arch Y]   \u2014 compile an embedded payload")
             print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 payloads{C.RESET}               \u2014 list the typed payload store")
             print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}c2 stop{C.RESET}                    \u2014 shut the listener down")
             print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}handshake: listener \u2194 payload must share a protocol tag (e.g. ws-json-async){C.RESET}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}exploit modules: {C.CYAN}from wraith import store{C.RESET}{C.GRAY} → {C.RESET}"
-                  f"{C.GRAY}store.resolve_payload(opts['PAYLOAD'], kinds=…){C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}builders are payload MODULES (module type 'payload') — the framework ships{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}no payload sources and no compilers: the module script builds the artifact{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}in ANY language from its own sources and registers it via{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}wraith.store.register_payload(){C.RESET}{C.GRAY} \u2014 profile (url/token/tags) from{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}EIDOLON_SHELL.wraith_listener{C.RESET}{C.GRAY} whenever a listener is running{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}exploits take them through the dedicated field: declare an option with{C.RESET}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.CYAN}\"kind\": \"payload\"{C.RESET}{C.GRAY} ({C.CYAN}\"types\": (…){C.RESET}{C.GRAY}) \u2014 validated on set, manifest dict at run{C.RESET}")
             print(f"  {C.PURPLE}╰────────────────────────────────────────╯\n")
             return
 
@@ -1393,11 +1468,9 @@ class Eidolon(cmd.Cmd):
             print(f"  {C.PURPLE}│{C.RESET}  token     : {C.CYAN}{lsn.token}{C.RESET}")
             print(f"  {C.PURPLE}│{C.RESET}  endpoint  : {lsn.endpoint_path}")
             print(f"  {C.PURPLE}│{C.RESET}  protocol  : {C.CYAN}{' '.join(lsn.tags)}{C.RESET} {C.GRAY}(payloads must share one tag){C.RESET}")
-            tc = toolchains()
-            tip = " · ".join(f"{k}: {C.GREEN}ok{C.RESET}" if v else f"{k}: {C.GRAY}absent{C.RESET}" for k, v in tc.items())
-            print(f"  {C.PURPLE}│{C.RESET}  builders  : {tip}")
+            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}payload builders: payload-type modules — see c2 help{C.RESET}")
             print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}payloads dial this URL home; connect events are reported live{C.RESET}")
-            print(f"  {C.PURPLE}╰{C.RESET}  {C.GRAY}next: {C.CYAN}c2 build{C.RESET}{C.GRAY} → deliver the binary · {C.CYAN}c2 sessions{C.RESET}{C.GRAY}\n{C.RESET}")
+            print(f"  {C.PURPLE}╰{C.RESET}  {C.GRAY}next: {C.CYAN}c2 payloads{C.RESET}{C.GRAY} → typed store · {C.CYAN}use <payload module> run{C.RESET}{C.GRAY} → build · {C.CYAN}c2 sessions{C.RESET}{C.GRAY}\n{C.RESET}")
             return
 
         if sub == "status":
@@ -1424,54 +1497,15 @@ class Eidolon(cmd.Cmd):
                              f"{s.implant}/{s.os}-{s.arch}", s.addr,
                              _uptime_str(s.connected_at)])
             if not rows:
-                return info("no sessions yet — build and deliver a payload.")
+                return info("no sessions yet — run a payload-type module and deliver its artifact.")
             print_table(["", "SID", "Identity", "Implant", "Address", "Uptime"], rows,
                         title="WRAITH SESSIONS")
-            return
-
-        if sub == "build":
-            lsn = self._wraith_listener
-            if not lsn or not lsn.running:
-                return err("no running listener — start one first (c2 serve) so the profile can be embedded")
-            name, goos, goarch, out_dir = None, None, None, None
-            i = 0
-            positional = []
-            while i < len(rest):
-                a = rest[i]
-                if a in ("--os", "--arch") and i + 1 < len(rest):
-                    if a == "--os": goos = rest[i + 1]
-                    else: goarch = rest[i + 1]
-                    i += 2
-                elif a == "--out" and i + 1 < len(rest):
-                    out_dir = rest[i + 1]; i += 2
-                else:
-                    positional.append(a); i += 1
-            backend = positional[0] if positional else "go"
-            name = positional[1] if len(positional) > 1 else None
-            ok_flag, msg, binary = build_payload(backend, out_dir=out_dir, url=lsn.url,
-                                                 token=lsn.token, goos=goos, goarch=goarch,
-                                                 tags=lsn.tags)
-            if not ok_flag:
-                return err(msg)
-            import platform as _platform
-            manifest = store.register_payload(
-                name or f"{backend}-{goos or 'native'}-{time.strftime('%Y%m%d-%H%M%S')}",
-                binary,
-                payload_type(backend, goos),
-                backend=backend,
-                target_os=goos or _platform.system().lower(),
-                arch=goarch or _platform.machine(),
-                protocol_tag=";".join(lsn.tags),
-            )
-            print(f"  {C.PURPLE}│{C.RESET}  {msg}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GREEN}stored{C.RESET} : {store.summary(manifest)}")
-            print(f"  {C.PURPLE}│{C.RESET}  {C.GRAY}→ exploit modules pick it up by name via store.resolve_payload(){C.RESET}\n")
             return
 
         if sub == "payloads":
             payloads = store.list_payloads()
             if not payloads:
-                return info(f"payload store empty — build one with {C.CYAN}c2 build{C.RESET}")
+                return info(f"payload store empty \u2014 a payload-type module fills it via store.register_payload()")
             rows = []
             for p in payloads.values():
                 rows.append([C.PINK + p["name"] + C.RESET, p.get("type", "?"),

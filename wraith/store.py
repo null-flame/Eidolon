@@ -11,12 +11,20 @@ Types (advisory taxonomy — delivery is always the module author's business):
   cmd        : a command line the target's shell executes
   code       : source executed by an interpreter on the target
 
-Exploit modules integrate with one call:
-    from wraith import store
-    path, manifest = store.resolve_payload(opts.get("PAYLOAD"), kinds=("file-posix",))
-`resolve_payload` accepts a store name or any filesystem path; store payloads
-are type-validated against `kinds`, external files are reported as type
-"external" so the module can decide (or reject with a clear error).
+The primary route for exploit modules is the DEDICATED payload field — declare
+an option with `"kind": "payload"` (+ the accepted `"types"`) and the framework
+validates on `set` and hands run() a manifest dict with "path" inside:
+
+    OPTIONS = {"payload": {"value": "", "kind": "payload",
+                           "types": ("file-posix", "file-win")}}
+    def run(opts):
+        artifact = opts["payload"]["path"]
+
+Underneath sits `resolve_payload`, which accepts a store name or any filesystem
+path; store payloads are type-validated against `kinds`, external files are
+reported as type "external" so the module can decide (or reject with a clear
+error). Payload-BUILDER modules (type "payload") place artifacts here via
+`register_payload`.
 """
 
 import hashlib
