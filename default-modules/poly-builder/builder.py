@@ -8,8 +8,9 @@
 ##
 ## Pipeline: profile -> validate cert material -> render _src/implant.<lang>
 ## with {{URL}} {{TOKEN}} {{CA_PEM}} {{CLIENT_CERT_PEM}} {{CLIENT_KEY_PEM}}
-## -> compile (go build / nim c) -> 0o700 artifact in the operator's working
-## directory (never temp) -> register_payload(keep=True).
+## -> compile (go build over implant.go + every sibling _src/*.go helper with
+## its build tags; nim c for the nim implant) -> 0o700 artifact in the
+## operator's working directory (never temp) -> register_payload(keep=True).
 
 import os
 import subprocess
@@ -154,6 +155,14 @@ def _compile(lang, src, artifact, target_os, target_arch, log):
             env["GOCACHE"] = os.path.join(work, "gocache")
             cmdline = ["go", "build", "-trimpath", "-buildvcs=false",
                        "-ldflags=-s -w", "-o", artifact, src_path]
+            assets_src = os.path.join(
+                os.path.dirname(os.path.abspath(__eidolon_path__)), "_src")
+            if os.path.isdir(assets_src):
+                for f in sorted(os.listdir(assets_src)):
+                    if f.endswith(".go") and f != "implant.go":
+                        shutil.copy2(os.path.join(assets_src, f),
+                                     os.path.join(work, f))
+                        cmdline.append(os.path.join(work, f))
             res = _probe("go", 180, cmdline, env)
         else:
             if target_arch not in _GARCH_MAP:

