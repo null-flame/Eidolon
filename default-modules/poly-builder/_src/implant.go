@@ -43,7 +43,7 @@ const (
 	defShell   = "/bin/sh" // windows: computed at runtime
 	execLimit  = 120 * time.Second
 	maxDL      = 4 << 20 // 4 MiB download cap
-	reconnect  = 5 * time.Second
+	reconnect  = {{BEACON}} * time.Second // beacon delay, baked by poly-builder
 	wsGUID     = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 )
 

