@@ -2,7 +2,7 @@
 
 The Eidolon kernel ships zero capability. By design nothing here is planted
 into `~/.eidolon/modules` for you: the scanner ignores this folder, and the
-framework never trusts anything you did not inspect. These are two
+framework never trusts anything you did not inspect. These are three
 production-quality reference modules — the small-kernel equivalent of "canon
 loadout" — you install explicitly:
 
@@ -12,6 +12,9 @@ install_local default-modules/poly-builder
 trust ws-mtls-listener
 trust poly-builder
 ```
+
+`install_local default-modules/rubika` ships the third module in the same
+directory form — `rubika_member_transfer`; install and trust it the same way:
 
 `install_local` / `add_module` ship exactly the assets a module declares in its
 module-level `ASSETS` list — files or directories, relative to the module file
@@ -24,12 +27,13 @@ the module copy is skipped but declared assets are still refreshed.
 (Or serve this repo as an index with `repo` and install both like any other
 remote module — TOFU applies either way.)
 
-## The pair
+## The loadout
 
 | module | role |
 | --- | --- |
 | `ws-mtls-listener` | listener — WebSocket over TLS (`wss`), mTLS implants, publishes a build profile |
 | `poly-builder` | payload — renders + compiles the bundled implants (`_src/implant.go`, `_src/implant.nim`), registers the artifact |
+| `rubika_member_transfer` | auxiliary — Rubika messenger ops on a maxrubika userbot session: transfer members between your groups and channels (group/channel in and out), view members (`view <id>` with channel pagination), chat info (`info <id>`, `whoami`); inner subshell, `/setsource` / `/settarget` / `/transfer` triggers in chat |
 
 Operator flow end to end:
 
@@ -53,6 +57,7 @@ The framework installs nothing, ever. Each module guards its own imports:
 - `poly-builder` + `lang=go`: a Go toolchain (`go` on PATH; stdlib-only implant, cross-compiles natively)
 - `poly-builder` + `lang=nim`: the Nim toolchain (`nim` on PATH; build flags include `-d:ssl` — Windows targets need the OpenSSL binaries next to the artifact or in the search path)
 - nim cross-compiling linux→windows is refused with guidance; build on the target OS or wire a cross toolchain yourself
+- `rubika_member_transfer`: a maxrubika session (`pip install maxrubika`)
 
 ## Wire protocol (`ws-json-mtls/1`)
 
@@ -94,3 +99,6 @@ sent over the wire that the implant could not have read from its own binary.
 - Python modules: `py_compile` clean; import smoke-tested with injected
   kernel globals (guardrails: missing name/lang/listener all produce clean
   `err()` messages).
+- `rubika_member_transfer`: `py_compile` clean; import smoke-tested with a
+  stub maxrubika client (channel pagination via `start_id`, bot/dup filtering,
+  batched `add_members`, subshell commands).
