@@ -1,3 +1,4 @@
+import ast
 import os
 import sys
 import cmd
@@ -111,7 +112,8 @@ PART 3 — WRITING AN EXPLOIT FROM ZERO (the exact recipe)
   1. Keep the layout free: this entry script is the only file the scanner
      knows; put raw sources/tools next to it or in _src/ (dirs starting
      with "_" or "." stay invisible to the scanner). Resolve siblings from
-     __eidolon_path__.
+     __eidolon_path__. Declare in ASSETS every file/dir install_local must
+     ship next to the module — it copies exactly that, nothing else.
   2. Declare OPTIONS for every knob the operator must touch — and NOTHING
      else. Required keys are things without which a run is nonsense (e.g.
      target). Validate deeper invariants inside run() yourself: the
@@ -184,6 +186,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 PAYLOAD_KIND = "file"       # display-only: shellcode | file | cmd | code | none
 
@@ -272,6 +275,8 @@ __NAME__ — ماژول EXPLOIT — راهنمای کامل صفر تا صد ت�
   ۱. چیدمان آزاد است: فقط همین اسکریپت ورودی را اسکنر می‌شناسد؛ سورس‌ها و
      ابزارها را کنارش یا در _src/ بگذار (پوشه‌هایی که با "_" یا "." شروع
      شوند برای اسکنر نامرئی‌اند). هم‌پوشه‌ها را از __eidolon_path__ حل کن.
+     هر فایل/پوشه‌ای که install_local باید همراه ماژول بنشاند را در ASSETS
+     اعلام کن — دقیقاً همان‌ها کپی می‌شوند، نه بیشتر.
   ۲. برای هر پیچی که اپراتور باید بچرخاند OPTIONS اعلام کن — و نه بیشتر.
      کلیدهای required فقط چیزهایی باشند که بدونشان اجرا بی‌معنی است
      (مثلاً target). فریم‌ورک فقط «بودن» را چک می‌کند؛ مکانیک باگِ توست،
@@ -342,6 +347,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 PAYLOAD_KIND = "file"       # display-only: shellcode | file | cmd | code | none
 
@@ -517,6 +523,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 
 OPTIONS = {
@@ -713,6 +720,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 
 OPTIONS = {
@@ -834,7 +842,8 @@ PART 3 — WRITING A BUILDER FROM ZERO (the exact recipe)
      secret), lsn.tags. Substitution is your choice: string replace, code
      emission, binpatch — whatever your pipeline likes.
   2. Read raw sources next to this file via __eidolon_path__ (e.g.
-     _src/implant.go), compile via subprocess — ALWAYS with a timeout:
+     _src/implant.go — declare it in ASSETS so install_local ships it),
+     compile via subprocess — ALWAYS with a timeout:
          subprocess.run([...], timeout=120, capture_output=True)
      Non-zero exit / timeout -> err(stderr tail) and stop.
   3. STORE WHERE THE OPERATOR STANDS — never in temp storage:
@@ -907,6 +916,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 
 OPTIONS = {
@@ -962,6 +972,7 @@ __NAME__ — بیلدر پیلود (PAYLOAD BUILDER) — راهنمای کامل
   ماژول همان بیلدر است. ایمپلنت را به «هر زبانی» بساز (go / nim / c / rust /
   c# / bash / python / PowerShell …) — اسکریپت ورودی پایتون است، خروجی مالِ
   توست. چیدمان آزاد (_src/، assets/ … — از __eidolon_path__ حل کن).
+  هر چه install_local باید همراه ماژول بنشاند را در ASSETS اعلام کن.
 
 بخش ۱ — قرارداد (همان دو نامِ هر ماژول)
   * OPTIONS  : پارامترهای زمانِ ساخت. اپراتور با `set` درون `gen <ماژول>`
@@ -986,7 +997,8 @@ __NAME__ — بیلدر پیلود (PAYLOAD BUILDER) — راهنمای کامل
      آنچه توافق می‌کنی را جاسازی کن: lsn.url (نقطه‌ی شماره‌گیری)،
      lsn.token (راز مشترک)، lsn.tags. شیوه‌ی جایگزینی دست خودت است:
      جایگزینی رشته، تولید کد، باینری‌پیچ — هر چه پایپ‌لاینِ تو می‌خواهد.
-  ۲. سورس‌های خام را کنار همین فایل بخوان (مثلاً _src/implant.go) و با
+  ۲. سورس‌های خام را کنار همین فایل بخوان (مثلاً _src/implant.go — در ASSETS
+     اعلامشان کن تا install_local همراهشان بیاورد) و با
      subprocess کامپایل کن — همیشه با timeout:
          subprocess.run([...], timeout=120, capture_output=True)
      خروج غیرصفر یا timeout <- err(دُم stderr) و بس.
@@ -1060,6 +1072,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 
 OPTIONS = {
@@ -1177,6 +1190,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 PAYLOAD_KIND = "none"
 
@@ -1283,6 +1297,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 PAYLOAD_KIND = "none"
 
@@ -1391,6 +1406,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 PAYLOAD_KIND = "none"
 
@@ -1481,6 +1497,7 @@ AUTHOR      = "__AUTHOR__"
 RANK        = "normal"      # quality grade: excellent > great > good > normal > average > low > manual
 TARGETS     = []            # what this applies to: ("linux/x86_64", "nginx 1.18-1.20"), versions, net ranges
 REFERENCES  = []            # advisories: CVE ids, writeups, vendor notes
+ASSETS      = []            # bundled files/dirs (relative to this file) install_local ships with the module
 
 PAYLOAD_KIND = "none"
 
@@ -1816,6 +1833,75 @@ def shell(opts):
 def _type_label(mod) -> str:
     t = _module_type(mod)
     return c(t, _TYPE_COLOR.get(t, "white"))
+
+
+def _declared_assets(py_file):
+    """Module-level ASSETS declaration, read via ast (never exec — TOFU).
+    Returns the declared list of strings, [] when nothing is declared,
+    or None when ASSETS exists but is not a list of strings."""
+    try:
+        tree = ast.parse(Path(py_file).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            names = [node.target.id] if isinstance(node.target, ast.Name) else []
+            value = node.value
+        else:
+            continue
+        if "ASSETS" not in names:
+            continue
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return [value.value]
+        if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+            return [e.value for e in value.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        return None
+    return []
+
+
+def _ship_declared_assets(fsrc, fdest_base, key):
+    """Copy exactly the assets this module declares (files or directories,
+    relative to the module file) next to its installed copy. Declared
+    directories skip __pycache__, hidden entries and .pyc."""
+    declared = _declared_assets(fsrc)
+    if declared is None:
+        warn(f"'{key}': module-level ASSETS is not a list of strings — ignored")
+        return []
+    dests = []
+    for rel in declared:
+        parts = ()
+        if isinstance(rel, str):
+            parts = tuple(p for p in rel.replace("\\", "/").split("/")
+                          if p not in ("", "."))
+        if (not parts or rel.startswith(("/", "~")) or ".." in parts
+                or (len(rel) > 1 and rel[1] == ":")):
+            warn(f"'{key}': invalid entry in ASSETS (skipped): {rel!r}")
+            continue
+        asset_src = fsrc.parent.joinpath(*parts)
+        if not asset_src.exists():
+            warn(f"'{key}': declared asset missing (skipped): {rel}")
+            continue
+        if asset_src.is_file():
+            fdest = fdest_base.joinpath(*parts)
+            fdest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(asset_src, fdest)
+            dests.append(fdest)
+            continue
+        for child in sorted(asset_src.rglob("*")):
+            cparts = child.relative_to(fsrc.parent).parts
+            if (not child.is_file() or "__pycache__" in cparts
+                    or any(p.startswith(".") for p in cparts)
+                    or child.name.endswith(".pyc")):
+                continue
+            fdest = fdest_base.joinpath(*cparts)
+            fdest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(child, fdest)
+            dests.append(fdest)
+    return dests
 
 
 class Eidolon(cmd.Cmd):
@@ -2454,6 +2540,7 @@ class Eidolon(cmd.Cmd):
         is_dir = src_path.is_dir()
         if not is_dir and not str(src_path).endswith(".py"):
             return err("only .py files or directories allowed")
+
         if is_dir:
             py_files = [f for f in src_path.rglob("*.py")
                         if not f.name.startswith(("_", "@")) and "__pycache__" not in str(f)]
@@ -2480,6 +2567,8 @@ class Eidolon(cmd.Cmd):
         installed = []  # (module_key, abs_path, orig_path)
 
         try:
+            asset_dests = []
+
             if is_dir:
                 base_dest = dest_rel.rstrip("/")
                 for fsrc in py_files:
@@ -2490,27 +2579,38 @@ class Eidolon(cmd.Cmd):
                     key = fdest_rel[:-3]
                     if self.trust_mgr.get_entry(key) and not force:
                         warn(f"'{key}' already registered — skipping (use --force)")
-                        continue
-                    shutil.copy2(fsrc, fdest)
-                    installed.append((key, str(fdest), str(fsrc)))
+                    else:
+                        shutil.copy2(fsrc, fdest)
+                        installed.append((key, str(fdest), str(fsrc)))
+                    asset_dests.extend(_ship_declared_assets(fsrc, fdest.parent, key))
             else:
                 dest_path = Path(MODULES_DIR) / dest_rel
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 key = dest_rel[:-3]
                 if self.trust_mgr.get_entry(key) and not force:
+                    asset_dests.extend(_ship_declared_assets(src_path, dest_path.parent, key))
                     return warn(f"'{key}' already registered — use --force to overwrite")
                 shutil.copy2(src_path, dest_path)
                 installed.append((key, str(dest_path), str(src_path)))
+                asset_dests.extend(_ship_declared_assets(src_path, dest_path.parent, key))
 
         except Exception as e:
             return err(f"copy failed: {e}")
 
-        if not installed:
+        if not installed and not asset_dests:
             return warn("nothing installed")
 
         for key, fp, orig in installed:
             self.trust_mgr.register_untrusted(key, fp, source="local", original=orig)
             ok(f"installed {C.CYAN}{key}{C.RESET} → {os.path.relpath(fp, MODULES_DIR)}")
+
+        if asset_dests:
+            samples = sorted(os.path.relpath(str(f), MODULES_DIR) for f in asset_dests)
+            head = ", ".join(samples[:3]) + (" …" if len(samples) > 3 else "")
+            ok(f"shipped {len(asset_dests)} ASSETS file(s) alongside ({head})")
+
+        if not installed:
+            return info("no module(s) installed — declared ASSETS only")
 
         warn(f"{len(installed)} module(s) installed but UNTRUSTED")
         warn(f"inspect: {C.PINK}trusted --all{C.RESET}   trust: {C.PINK}trust <path>{C.RESET}")
@@ -2613,7 +2713,7 @@ class Eidolon(cmd.Cmd):
         self.load_modules()
 
     def do_add_module(self, arg):
-        """add_module <src> [dest] [--force] — Install local module (TOFU: untrusted until trusted)"""
+        """add_module <src> [dest] [--force] — Install local module (TOFU: untrusted until trusted); ships the module's declared ASSETS with it"""
         return self._do_install_local(arg)
 
     def do_install_local(self, arg):

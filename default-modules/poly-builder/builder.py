@@ -28,6 +28,7 @@ AUTHOR      = "ghost-union"
 
 PAYLOAD_KIND = "file"
 REQUIREMENTS = []           # toolchains are binaries (go / nim), not pip.
+ASSETS       = ("_src",)    # bundled implant sources install_local ships with this module
 
 OPTIONS = {
     "lang": {
