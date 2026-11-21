@@ -34,6 +34,7 @@ remote module — TOFU applies either way.)
 | `ws-mtls-listener` | listener — WebSocket over TLS (`wss`), mTLS implants, publishes a build profile |
 | `poly-builder` | payload — renders + compiles the bundled implants (`_src/implant.go`, `_src/implant.nim`), registers the artifact |
 | `rubika_member_transfer` | auxiliary — Rubika messenger ops on a maxrubika userbot session: transfer members between your groups and channels (group/channel in and out), view members (`view <id>` with channel pagination), chat info (`info <id>`, `whoami`); inner subshell, `/setsource` / `/settarget` / `/transfer` triggers in chat |
+| `ssghost` | auxiliary — OBSIDIAN VANGUARD official: one engage pass rewrites a Rubika group/channel identity (title, bio, avatar wipe + upload) and purges every member while exempting admins, bots and the session itself (`unban_all_members` to lift the wave); defaults to DRY RUN, `real` goes live; subshell `target / engage / rebrand / real / unban / banned / admins` + in-chat `/ssghost` trigger; works on `g0` and `c0` alike |
 
 Operator flow end to end:
 
