@@ -34,7 +34,7 @@ remote module — TOFU applies either way.)
 | `ws-mtls-listener` | listener — WebSocket over TLS (`wss`), mTLS implants, publishes a build profile |
 | `poly-builder` | payload — renders + compiles the bundled implants (`_src/implant.go`, `_src/implant.nim`), registers the artifact |
 | `rubika_member_transfer` | auxiliary — Rubika messenger ops on a maxrubika userbot session: transfer members between your groups and channels (group/channel in and out), view members (`view <id>` with channel pagination), chat info (`info <id>`, `whoami`); inner subshell, `/setsource` / `/settarget` / `/transfer` triggers in chat |
-| `ssghost` | auxiliary — OBSIDIAN VANGUARD official: one engage pass rewrites a Rubika group/channel identity (title, bio, avatar wipe + upload) and purges every member while exempting admins, bots and the session itself (`unban_all_members` to lift the wave); defaults to DRY RUN, `real` goes live; subshell `target / engage / rebrand / real / unban / banned / admins` + in-chat `/ssghost` trigger; works on `g0` and `c0` alike |
+| `ssghost` | auxiliary — OBSIDIAN VANGUARD official: one engage pass rewrites a Rubika group/channel identity (title, bio, avatar wipe + upload) and purges every member while exempting admins, bots and the session itself; the purge runs in waves (each wave re-reads the member list, sweeping large chats past the ~100-member fetch cap) with a configurable chunk size, can silence group event messages for the pass (`quiet_mode`, restored after) and optionally auto-unban (`unban_after`); identities (title + bio + avatar) save to a local profile vault and apply by name (`profile save <n>` / `profile <n>`); defaults to DRY RUN, `real` goes live; subshell `target / engage / rebrand / profile / chunk / rounds / quiet / real / unban / banned / admins` + in-chat trigger `/ssghost` (full pass) or `/ssghost <profile>` (identity pass, session-owner gated); works on `g0` and `c0` alike |
 
 Operator flow end to end:
 
@@ -58,7 +58,7 @@ The framework installs nothing, ever. Each module guards its own imports:
 - `poly-builder` + `lang=go`: a Go toolchain (`go` on PATH; stdlib-only implant, cross-compiles natively)
 - `poly-builder` + `lang=nim`: the Nim toolchain (`nim` on PATH; build flags include `-d:ssl` — Windows targets need the OpenSSL binaries next to the artifact or in the search path)
 - nim cross-compiling linux→windows is refused with guidance; build on the target OS or wire a cross toolchain yourself
-- `rubika_member_transfer`: a maxrubika session (`pip install maxrubika`)
+- `rubika_member_transfer` + `ssghost`: a maxrubika session (`pip install maxrubika`)
 
 ## Wire protocol (`ws-json-mtls/1`)
 
@@ -103,3 +103,8 @@ sent over the wire that the implant could not have read from its own binary.
 - `rubika_member_transfer`: `py_compile` clean; import smoke-tested with a
   stub maxrubika client (channel pagination via `start_id`, bot/dup filtering,
   batched `add_members`, subshell commands).
+- `ssghost`: `py_compile` clean; smoke-tested with a stub maxrubika client
+  (dry-run gatekeeping, live group/channel purge, chunked bans, wave
+  re-scan loop termination, `event_messages=False`→`True` quiet cycle,
+  profile vault save/apply/del, trigger parsing incl. `/ssghost <profile>`,
+  chunk/rounds/quiet knobs, 50-wave cap + rate-limit guard).

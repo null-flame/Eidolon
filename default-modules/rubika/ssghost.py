@@ -14,6 +14,13 @@ One "engage" pass can do ALL of the following (each step is toggle-able):
   ◼  purge          ban EVERY member — admins, bots and your own
                      session are exempt                       (get_group_admins/get_channel_admins + ban_members)
   ◼  unban          lift every existing ban on the chat       (unban_all_members)
+  ◼  waves          the purge re-reads the member list after every
+                     wave, sweeping large chats past the ~100-member
+                     fetch cap until the purge list is empty
+  ◼  quiet mode     silence group event messages for the duration
+                     of the pass, restore them afterwards     (edit_group_info event_messages)
+  ◼  profiles       forge identities (title + bio + avatar) into a
+                     local vault and apply them by name
 
 Works identically for GROUPS (g0) and CHANNELS (c0) — the module
 detects the chat kind and routes to the matching maxrubika API.
@@ -27,16 +34,25 @@ OPERATOR FLOW:
     rebrand                       retitle + bio + avatar only (no bans)
     unban                         lift all bans on the target
     banned                        count/list banned members
+    chunk <N> / rounds <N>        ban batch size / purge wave count
+    quiet on|off                  silence group event messages during passes
+    profile / profile save <n>    identity vault: list / forge (title+bio+avatar)
+    profile <n> / profile del <n> apply now / shatter a saved profile
     status / log / stop           live ops
 
-In-chat: send the `trigger` (default /ssghost) inside any group or
-channel you administer to engage the full pass on that chat.
+In-chat: send the `trigger` inside any group or channel you administer
+to engage the full pass on that chat:
+    `/ssghost`                full pass with the current options
+    `/ssghost <profile>`      identity-only pass with that saved profile
+With trigger_requires_self on (default), only the session's own
+account can fire the trigger.
 
 ⚠  This module crashes communities by design. It only works on chats
    where the session holds admin/creator rights — Rubika enforces
    that server-side. Point it only at chats you own or administer.
 """
 
+import json
 import os
 import random
 import threading
@@ -69,7 +85,7 @@ class _OX:
 BANNER = r"""
    ◼◼◼◼   ◼   ◼  ◼◼◼◼◼   ◼◼◼◼   ◼     ◼     OBSIDIAN VANGUARD
   ◼     ◼ ◼   ◼  ◼      ◼     ◼  ◼     ◼     the blade of Ghost Union
-  ◼     ◼ ◼   ◼  ◼◼◼◼   ◼     ◼  ◼     ◼     ssghost · v3.0.0
+  ◼     ◼ ◼   ◼  ◼◼◼◼   ◼     ◼  ◼     ◼     ssghost · v3.1.0
   ◼     ◼  ◼ ◼   ◼      ◼     ◼   ◼   ◼      forged in pressure
    ◼◼◼◼     ◼    ◼◼◼◼◼   ◼◼◼◼      ◼◼◼       first to engage
 """
@@ -80,8 +96,8 @@ TAGLINE = "Forged in pressure. Sharpened in silence. First to engage."
 #  Module metadata
 # ──────────────────────────────────────────────────────────────────────────────
 NAME        = "ssghost"
-VERSION     = "3.0.0"
-DESCRIPTION = "OBSIDIAN VANGUARD official — retitle/re-bio/re-avatar a Rubika group or channel and purge every member (admins & bots exempt) via maxrubika"
+VERSION     = "3.1.0"
+DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable identity profiles), silence event messages during the pass, and purge every member in waves (admins & bots exempt) via maxrubika"
 AUTHOR      = "null-flame"
 CATEGORY    = "social"
 MODULE_TYPE = "auxiliary"
@@ -156,6 +172,26 @@ OPTIONS = {
         "required": False,
         "desc":     "delay between ban chunks (seconds)",
     },
+    "purge_rounds": {
+        "value":    1,
+        "required": False,
+        "desc":     "purge waves: after each wave the member list is re-read, so banned members drop out and the next wave reaches past the ~100-member fetch cap (max 50)",
+    },
+    "quiet_mode": {
+        "value":    False,
+        "required": False,
+        "desc":     "groups only: silence event messages during the pass via edit_group_info(event_messages=False), restore True afterwards",
+    },
+    "profile": {
+        "value":    "",
+        "required": False,
+        "desc":     "name of a saved identity profile (title + bio + avatar) to arm at boot",
+    },
+    "trigger_requires_self": {
+        "value":    True,
+        "required": False,
+        "desc":     "the in-chat trigger only fires when the session's own account sends it",
+    },
     "unban_after": {
         "value":    False,
         "required": False,
@@ -188,12 +224,20 @@ _state = {
     "protect_bots":   True,
     "ban_chunk":      10,
     "ban_delay":      2.0,
+    "purge_rounds":   1,
+    "quiet_mode":     False,
+    "trigger_requires_self": True,
+    "self_guid":      None,
+    "profile":        "",
     "unban_after":    False,
     "dry_run":        True,
     "stats": {
         "kind":        None,   # group | channel
         "guid":        None,
         "members":     0,
+        "scanned":     0,
+        "rounds":      0,
+        "quiet":       None,
         "admins":      0,
         "bots":        0,
         "banned":      0,
@@ -326,6 +370,62 @@ def _member_guid(m):
     return _get(m, "member_guid") or _get(m, "guid") or _get(m, "user_guid")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Profile vault — named identities (title + bio + avatar) persisted on disk
+# ─────────────────────────────────────────────────────────────────────────────
+PROFILE_VAULT = os.path.join(os.path.expanduser("~"), ".eidolon", "ssghost_profiles.json")
+
+
+def _load_profiles():
+    try:
+        with open(PROFILE_VAULT, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return dict(data) if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        _o(f"{_OX.ASH}ℹ profile vault unreadable ({e}) — starting empty{_OX.RESET}")
+        return {}
+
+
+def _save_profiles(profiles):
+    os.makedirs(os.path.dirname(PROFILE_VAULT), exist_ok=True)
+    with open(PROFILE_VAULT, "w", encoding="utf-8") as f:
+        json.dump(profiles, f, ensure_ascii=False, indent=2)
+
+
+def _apply_profile(name):
+    """Pull a saved identity into the live title/bio/avatar slots."""
+    prof = _load_profiles().get(name)
+    if not isinstance(prof, dict):
+        return False
+    _state["new_name"] = str(_get(prof, "name") or "")
+    _state["new_bio"] = str(_get(prof, "bio") or "")
+    _state["avatar"] = str(_get(prof, "avatar") or "")
+    return True
+
+
+def _parse_trigger(raw):
+    """Message text → (is_trigger, profile_name_or_'')."""
+    stripped = (raw or "").strip()
+    trig = _state["trigger"]
+    if stripped == trig:
+        return True, ""
+    if stripped.startswith(trig + " "):
+        return True, stripped[len(trig):].strip()
+    return False, ""
+
+
+def _profile_engage_thread(client, target, name, keep):
+    if not _apply_profile(name):
+        err(f"profile '{name}' vanished from the vault")
+        return
+    try:
+        _engage_worker(client, target, _state.get("self_guid"))
+    finally:
+        _state["ban_all"], _state["unban_after"], _state["dry_run"] = keep
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  The four blades
 # ──────────────────────────────────────────────────────────────────────────────
@@ -400,20 +500,14 @@ def _blade_avatar(client, guid, avatar_path, wipe):
     return True
 
 
-def _blade_purge(client, guid, kind, self_guid, admin_guids):
-    """
-    ◼ blade four — the purge.
-    Bans EVERY member of the chat EXCEPT:
-      · admins / creator            (protect_admins)
-      · bots                        (protect_bots)
-      · the session account itself
-    """
+def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rounds):
+    """▸ wave — fetch, filter, ban. Returns how many were banned this round."""
     s = _state["stats"]
-    s["admins"] = len(admin_guids)
-
-    _o(f"reading every member of the {_kind_label(kind)}…")
+    label = f"purge wave {round_no}/{total_rounds}" if total_rounds > 1 else "the purge"
+    _o(f"reading every member of the {_kind_label(kind)} — {label}…")
     members = _fetch_all_members(client, guid, kind)
     s["members"] = len(members)
+    s["scanned"] += len(members)
 
     condemned = []
     for m in members:
@@ -436,19 +530,20 @@ def _blade_purge(client, guid, kind, self_guid, admin_guids):
         f"(admins spared: {s['admins']}, bots spared: {s['bots']})"
     )
     if not condemned:
-        ok("nothing to purge — the chat is already clean")
-        return
+        ok("nothing left to purge — the chat is clean")
+        return 0
 
     if _state["dry_run"]:
         warn("DRY RUN — no bans sent. set dry_run false (or command 'real') to commit.")
-        return
+        return 0
 
+    before = s["banned"]
     chunk_size = max(1, _state["ban_chunk"])
     total = (len(condemned) + chunk_size - 1) // chunk_size
     for i in range(0, len(condemned), chunk_size):
         if _state["stop"]:
             _o(f"{_OX.ASH}⏹ purge stopped by operator")
-            return
+            break
         chunk = condemned[i:i + chunk_size]
         n = i // chunk_size + 1
         try:
@@ -463,7 +558,34 @@ def _blade_purge(client, guid, kind, self_guid, admin_guids):
             if "TOO_REQUESTS" in str(e) or "rate" in str(e).lower():
                 _o(f"{_OX.BLOOD}🛑 rate limit — purge halting")
                 _state["stop"] = True
-                return
+                break
+    return s["banned"] - before
+
+
+def _blade_purge(client, guid, kind, self_guid, admin_guids):
+    """
+    ▣ blade four — the purge, in waves.
+    Every member of the chat is banned EXCEPT: admins/creator (protect_admins),
+    bots (protect_bots) and the session account itself. Each wave re-reads the
+    member list — banned members drop out of it, so the next wave reaches past
+    Rubika's ~100-member fetch window on large chats. Waves continue until the
+    purge list is empty, the operator hits 'stop', or purge_rounds runs out.
+    """
+    s = _state["stats"]
+    s["admins"] = len(admin_guids)
+    rounds = max(1, min(50, int(_state["purge_rounds"] or 1)))
+    if _state["dry_run"]:
+        rounds = 1
+    for r in range(1, rounds + 1):
+        if _state["stop"]:
+            _o(f"{_OX.ASH}⏹ purge stopped by operator")
+            break
+        s["rounds"] = r
+        if _purge_round(client, guid, kind, self_guid, admin_guids, r, rounds) <= 0:
+            break
+        if r < rounds:
+            _o(f"wave {r} spent — rescanning what is left…")
+            _sleep(1.0)
 
 
 def _unban_wave(client, guid):
@@ -490,11 +612,14 @@ def _engage_worker(client, target, self_guid=None):
     _state["engaging"] = True
     _state["stop"] = False
     s = _state["stats"]
-    for key in ("kind", "guid", "members", "admins", "bots", "banned",
-                "ban_failed", "unbanned", "retitled", "rebioed",
+    for key in ("kind", "guid", "members", "scanned", "rounds", "admins", "bots", "banned",
+                "ban_failed", "unbanned", "quiet", "retitled", "rebioed",
                 "avatars_old", "avatars_new"):
-        s[key] = False if key in ("retitled", "rebioed") else (None if key == "kind" else 0)
+        s[key] = False if key in ("retitled", "rebioed") else (
+            None if key in ("kind", "quiet") else 0
+        )
     s["started_at"] = time.time()
+    self_guid = self_guid or _state.get("self_guid")
 
     try:
         if _state["dry_run"]:
@@ -521,7 +646,22 @@ def _engage_worker(client, target, self_guid=None):
             blades.append("purge")
         if _state["unban_after"]:
             blades.append("unban")
+        if _state["quiet_mode"]:
+            blades.append("quiet")
         _o(f"blades drawn: {_OX.EDGE}{', '.join(blades) or 'none'}{_OX.RESET}")
+
+        if _state["quiet_mode"]:
+            if _state["dry_run"]:
+                warn("DRY RUN — would silence group event messages for the pass")
+            elif kind == "group":
+                try:
+                    client.edit_group_info(guid, event_messages=False)
+                    s["quiet"] = "off"
+                    _o(f"{_OX.ASH}ℹ event messages silenced for the duration of the pass{_OX.RESET}")
+                except Exception as e:
+                    _o(f"{_OX.ASH}ℹ could not silence event messages — {e}{_OX.RESET}")
+            else:
+                _o(f"{_OX.ASH}ℹ event messages are a group setting — nothing to silence on a channel{_OX.RESET}")
 
         try:
             _blade_title(client, guid, kind, _state["new_name"])
@@ -546,12 +686,20 @@ def _engage_worker(client, target, self_guid=None):
             _unban_wave(client, guid)
 
     finally:
+        if s.get("quiet") == "off" and s.get("guid"):
+            try:
+                client.edit_group_info(s["guid"], event_messages=True)
+                s["quiet"] = "restored"
+                _o(f"{_OX.ASH}ℹ event messages restored{_OX.RESET}")
+            except Exception as e:
+                s["quiet"] = "restore-failed"
+                _o(f"{_OX.BLOOD}✗✗{_OX.RESET} event-messages restore failed — {e}")
         _state["engaging"] = False
         elapsed = (time.time() - s["started_at"]) if s["started_at"] else 0
         _o(
             f"{_OX.VIOLET}◼ engage report{_OX.RESET} — retitled={s['retitled']} "
             f"rebioed={s['rebioed']} avatars_old={s['avatars_old']} avatars_new={s['avatars_new']} "
-            f"members={s['members']} banned={s['banned']} failed={s['ban_failed']} "
+            f"members={s['members']} scanned={s['scanned']} waves={s['rounds']} banned={s['banned']} failed={s['ban_failed']} "
             f"admins={s['admins']} bots={s['bots']} time={elapsed:.1f}s"
         )
 
@@ -559,6 +707,73 @@ def _engage_worker(client, target, self_guid=None):
 # ──────────────────────────────────────────────────────────────────────────────
 #  Subshell ops
 # ──────────────────────────────────────────────────────────────────────────────
+def _profiles_cmd(arg):
+    store = _load_profiles()
+    parts = arg.split(maxsplit=1)
+    sub = (parts[0] or "").lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub == "save":
+        if not rest:
+            err("usage: profile save <name>")
+            return
+        if not (_state["new_name"] or _state["new_bio"] or _state["avatar"]):
+            err("identity is empty — set new_name / new_bio / avatar (or load one: profile <name>)")
+            return
+        store[rest] = {
+            "name": _state["new_name"],
+            "bio": _state["new_bio"],
+            "avatar": _state["avatar"],
+        }
+        try:
+            _save_profiles(store)
+        except Exception as e:
+            err(f"profile save failed — {e}")
+            return
+        ok(f"profile '{rest}' forged → {PROFILE_VAULT}")
+    elif sub in ("del", "rm", "delete"):
+        if not rest or rest not in store:
+            err(f"no profile named '{rest}'")
+            return
+        del store[rest]
+        try:
+            _save_profiles(store)
+        except Exception as e:
+            err(f"profile delete failed — {e}")
+            return
+        ok(f"profile '{rest}' shattered")
+    elif sub in ("list", "ls") or not sub:
+        if not store:
+            _o(f"{_OX.ASH}ℹ vault empty — forge one: profile save <name>  ({PROFILE_VAULT})")
+            return
+        _o(f"profile vault ({_OX.VIOLET}{len(store)}{_OX.RESET}) → {PROFILE_VAULT}")
+        for pname, prof in store.items():
+            name = _get(prof, "name") or "—"
+            bio = str(_get(prof, "bio") or "—")
+            av = str(_get(prof, "avatar") or "—")
+            print(f"      {_OX.EDGE}{pname}{_OX.RESET} · title={name} · bio={bio[:40]} · avatar={os.path.basename(av)}")
+    else:
+        name = arg.strip()
+        if not _apply_profile(name):
+            err(f"no profile named '{name}' — 'profile save {name}' forges it")
+            return
+        ok(f"profile '{name}' loaded → title/bio/avatar set")
+        if _state["target"] and not _state["engaging"]:
+            keep = (_state["ban_all"], _state["unban_after"], _state["dry_run"])
+            _state["ban_all"] = False
+            _state["unban_after"] = False
+            _state["dry_run"] = False
+            warn(f"LIVE identity pass — profile '{name}' on {_state['target']}")
+            threading.Thread(
+                target=_profile_engage_thread,
+                args=(_state["client"], _state["target"], name, keep),
+                daemon=True,
+                name="ssghost-profile",
+            ).start()
+        else:
+            _o(f"{_OX.ASH}ℹ profile '{name}' armed — set a target, or send '{_state['trigger']} {name}' in-chat{_OX.RESET}")
+
+
 def _prompt_fn():
     s = _state["stats"]
     flag = "▶" if _state["engaging"] else "◼"
@@ -572,8 +787,8 @@ def _prompt_fn():
 
 def _completer(text, line, begidx, endidx):
     cmds = [
-        "target", "engage", "real", "rebrand", "unban", "banned", "admins",
-        "status", "log", "stop", "help",
+        "target", "engage", "real", "rebrand", "profile", "chunk", "rounds",
+        "quiet", "unban", "banned", "admins", "status", "log", "stop", "help",
     ]
     return [c for c in cmds if c.startswith(text)]
 
@@ -677,6 +892,37 @@ def _subshell_handler(line):
         for g in list(admins)[:30]:
             print(f"      {_OX.LIVE}{g}{_OX.RESET}")
 
+    elif cmd == "chunk":
+        try:
+            n = max(1, int(arg))
+        except ValueError:
+            err("usage: chunk <N> — members per ban_members call")
+            return
+        _state["ban_chunk"] = n
+        ok(f"ban chunk size → {n}")
+
+    elif cmd == "rounds":
+        try:
+            n = max(1, int(arg))
+        except ValueError:
+            err("usage: rounds <N> — purge waves, each rescans the member list")
+            return
+        _state["purge_rounds"] = min(50, n)
+        warn(f"purge waves → {_state['purge_rounds']} (rescan until the purge list is empty)")
+
+    elif cmd == "quiet":
+        if arg.lower() in ("on", "true", "1", "yes"):
+            _state["quiet_mode"] = True
+            warn("quiet mode ON — group event messages silenced during passes, restored after")
+        elif arg.lower() in ("off", "false", "0", "no"):
+            _state["quiet_mode"] = False
+            ok("quiet mode OFF")
+        else:
+            _o(f"quiet mode is {_OX.LIVE + 'ON' if _state['quiet_mode'] else _OX.ASH + 'OFF'}{_OX.RESET} — usage: quiet on|off")
+
+    elif cmd == "profile":
+        _profiles_cmd(arg)
+
     elif cmd == "status":
         elapsed = (time.time() - s["started_at"]) if s["started_at"] else 0
         print(f"\n  {_OX.VIOLET}╔══{"═" * 53}╗{_OX.RESET}")
@@ -692,6 +938,7 @@ def _subshell_handler(line):
         print(f"  {_OX.VIOLET}║{_OX.RESET}  ban_all      : {_OX.LIVE if _state['ban_all'] else _OX.ASH}{_state['ban_all']}{_OX.RESET}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  protect      : admins={_state['protect_admins']} bots={_state['protect_bots']}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  unban_after  : {_state['unban_after']}")
+        print(f"  {_OX.VIOLET}║{_OX.RESET}  waves        : {s['rounds']} · scanned={s['scanned']} · chunk={_state['ban_chunk']} · quiet={'ON' if _state['quiet_mode'] else 'off'}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  members      : {s['members']}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  banned       : {_OX.BLOOD}{s['banned']}{_OX.RESET}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  ban_failed   : {s['ban_failed']}")
@@ -717,10 +964,17 @@ def _subshell_handler(line):
     {_OX.VIOLET}target <id>{_OX.RESET}    point the blade (group OR channel: guid/link/username)
     {_OX.VIOLET}engage{_OX.RESET}         full pass — retitle + bio + avatar + purge + unban (per options)
     {_OX.VIOLET}rebrand{_OX.RESET}        identity only — retitle + bio + avatar, no bans
+    {_OX.VIOLET}profile{_OX.RESET}         list saved identity profiles (the vault)
+    {_OX.VIOLET}profile save <n>{_OX.RESET}  forge the current title/bio/avatar as <n>
+    {_OX.VIOLET}profile <n>{_OX.RESET}      instant-apply a saved profile
+    {_OX.VIOLET}profile del <n>{_OX.RESET}   shatter a saved profile
+    {_OX.VIOLET}chunk <N>{_OX.RESET}       members per ban_members call
+    {_OX.VIOLET}rounds <N>{_OX.RESET}      purge waves — each wave rescans members until none left
     {_OX.VIOLET}real{_OX.RESET}           go LIVE (leaves dry-run; bans become irreversible)
     {_OX.VIOLET}unban{_OX.RESET}          lift every ban on the target
     {_OX.VIOLET}banned{_OX.RESET}         list banned members
     {_OX.VIOLET}admins{_OX.RESET}         list the untouchables (admins/creator)
+    {_OX.VIOLET}quiet on|off{_OX.RESET}    silence group event messages during passes
     {_OX.VIOLET}status{_OX.RESET}         live board
     {_OX.VIOLET}log{_OX.RESET}            tail the last 40 lines
     {_OX.VIOLET}stop{_OX.RESET}           abort the running pass
@@ -783,11 +1037,16 @@ def run(opts):
         "protect_bots":   bool(opts.get("protect_bots", True)),
         "ban_chunk":      max(1, num("ban_chunk", 10, int)),
         "ban_delay":      max(0.0, num("ban_delay", 2.0)),
+        "purge_rounds":   max(1, num("purge_rounds", 1, int)),
+        "quiet_mode":     bool(opts.get("quiet_mode", False)),
+        "trigger_requires_self": bool(opts.get("trigger_requires_self", True)),
+        "profile":        str(opts.get("profile") or "").strip(),
         "unban_after":    bool(opts.get("unban_after", False)),
         "dry_run":        bool(opts.get("dry_run", True)),
         "stats": {
             "kind": None, "guid": None, "members": 0, "admins": 0, "bots": 0,
             "banned": 0, "ban_failed": 0, "unbanned": 0,
+            "scanned": 0, "rounds": 0, "quiet": None,
             "retitled": False, "rebioed": False,
             "avatars_old": 0, "avatars_new": 0, "started_at": None,
         },
@@ -806,6 +1065,18 @@ def run(opts):
 
     _state["client"] = app
 
+    def _read_self_guid():
+        try:
+            me = app.get_me()
+        except Exception as e:
+            _o(f"{_OX.ASH}ℹ get_me failed ({e}) — session identity unavailable{_OX.RESET}")
+            return None
+        u = _get(me, "user")
+        return (_get(u, "guid") if u is not None else None) or _get(me, "guid") \
+            or _get(me, "user_guid") or _get(me, "object_guid")
+
+    _state["self_guid"] = _read_self_guid()
+
     # ── in-chat trigger — engage the chat the command was sent in ────────────
     @app.on_new_message()
     async def _handler(event):
@@ -815,7 +1086,8 @@ def run(opts):
             text = event.text
         except AttributeError:
             return
-        if not text or text.strip() != _state["trigger"]:
+        hot, profile_name = _parse_trigger(text)
+        if not hot:
             return
 
         chat = None
@@ -824,7 +1096,7 @@ def run(opts):
             if chat:
                 break
         if not chat:
-            _o("⚠ could not detect the chat id from the event")
+            _o(f"⚠ could not detect the chat id from the event")
             return
         if _kind_from_guid(chat) not in ("group", "channel"):
             _o(f"⚠ the trigger must be sent inside a group or channel (got {chat})")
@@ -833,7 +1105,30 @@ def run(opts):
             warn("an engage pass is already running")
             return
 
-        self_guid = getattr(event, "author_guid", None)
+        author = getattr(event, "author_guid", None)
+        if _state["trigger_requires_self"]:
+            mine = _state.get("self_guid")
+            if mine:
+                if author != mine:
+                    return
+            else:
+                _o(f"{_OX.ASH}ℹ trigger fired without self-check — session identity unknown{_OX.RESET}")
+
+        if profile_name:
+            if profile_name not in _load_profiles():
+                _o(f"{_OX.BLOOD}✗{_OX.RESET} trigger profile '{profile_name}' is not in the vault")
+                return
+            keep = (_state["ban_all"], _state["unban_after"], _state["dry_run"])
+            _o(f"{_OX.EDGE}trigger '{_state['trigger']} {profile_name}' received — profile pass on {chat}{_OX.RESET}")
+            threading.Thread(
+                target=_profile_engage_thread,
+                args=(app, chat, profile_name, keep),
+                daemon=True,
+                name="ssghost-profile",
+            ).start()
+            return
+
+        self_guid = author or _state.get("self_guid")
         _o(f"{_OX.EDGE}trigger '{_state['trigger']}' received — engaging {chat}{_OX.RESET}")
         threading.Thread(
             target=_engage_worker,
@@ -842,7 +1137,7 @@ def run(opts):
             name="ssghost-engage",
         ).start()
 
-    # ── background listener ───────────────────────────────────────────────────
+    # ───────────────────────────────────────────────── background listener ───────────────────────────────────────────────────
     _state["app_thread"] = threading.Thread(
         target=app.run,
         daemon=True,
@@ -851,6 +1146,12 @@ def run(opts):
     _state["app_thread"].start()
 
     # ── Obsidian Vanguard boot splash ─────────────────────────────────────────
+    if _state["profile"]:
+        if _apply_profile(_state["profile"]):
+            ok(f"profile '{_state['profile']}' armed — title/bio/avatar drawn from the vault")
+        else:
+            err(f"profile '{_state['profile']}' is not in the vault — 'profile save {_state['profile']}' forges it")
+
     print(f"{_OX.VIOLET}{BANNER}{_OX.RESET}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} {_OX.EDGE}{TAGLINE}{_OX.RESET}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} session       : {session}")
@@ -866,6 +1167,9 @@ def run(opts):
     print(f"  {_OX.VIOLET}◼{_OX.RESET} mode          : "
           f"{_OX.BLOOD + 'LIVE' if not _state['dry_run'] else _OX.ASH + 'DRY RUN'}{_OX.RESET}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} protect       : admins={_state['protect_admins']} · bots={_state['protect_bots']}")
+    print(f"  {_OX.VIOLET}◼{_OX.RESET} purge waves   : {_state['purge_rounds']} · chunk={_state['ban_chunk']} · quiet={'ON' if _state['quiet_mode'] else 'off'}")
+    vault = _load_profiles()
+    print(f"  {_OX.VIOLET}◼{_OX.RESET} profile vault : {len(vault)} saved → {', '.join(list(vault)[:6]) or 'empty'}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} type {_OX.EDGE}help{_OX.RESET} in the subshell\n")
 
     shell = globals().get("EIDOLON_SHELL")
