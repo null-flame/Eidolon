@@ -2059,7 +2059,12 @@ class Eidolon(cmd.Cmd):
                 if v not in (None, "", False): return str(v)
         return ""
 
-    def enter_subshell(self, handler, completer=None, prompt_fn=None, on_exit=None):
+    def enter_subshell(self, handler=None, completer=None, prompt_fn=None,
+                        on_exit=None, on_line=None):
+        if handler is None:
+            handler = on_line
+        elif on_line is not None:
+            raise TypeError("pass handler or on_line, not both")
         self._subshell_active = True
         self._subshell_handler = handler
         self._subshell_completer = completer
