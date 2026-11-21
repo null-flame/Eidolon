@@ -2454,11 +2454,36 @@ class Eidolon(cmd.Cmd):
         is_dir = src_path.is_dir()
         if not is_dir and not str(src_path).endswith(".py"):
             return err("only .py files or directories allowed")
+
+        def _asset_ok(rel_parts):
+            return ("__pycache__" not in rel_parts
+                    and not any(p.startswith(".") for p in rel_parts)
+                    and not rel_parts[-1].endswith(".pyc"))
+
+        asset_files = []   # bundled sources/tools the module needs at runtime
         if is_dir:
             py_files = [f for f in src_path.rglob("*.py")
                         if not f.name.startswith(("_", "@")) and "__pycache__" not in str(f)]
             if not py_files:
                 return err(f"no .py files found in {src_path}")
+            module_set = {str(f) for f in py_files}
+            asset_files = [
+                f for f in src_path.rglob("*")
+                if f.is_file() and str(f) not in module_set
+                and _asset_ok(f.relative_to(src_path).parts)
+            ]
+        else:
+            for sibling in src_path.parent.iterdir():
+                if not sibling.is_dir():
+                    continue
+                if sibling.name == "__pycache__" or sibling.name.startswith(".") \
+                        or not sibling.name.startswith("_"):
+                    continue
+                asset_files.extend(
+                    f for f in sibling.rglob("*")
+                    if f.is_file() and "__pycache__" not in f.parts
+                    and _asset_ok(f.relative_to(src_path.parent).parts)
+                )
 
         # Resolve destination
         if dest:
@@ -2480,6 +2505,17 @@ class Eidolon(cmd.Cmd):
         installed = []  # (module_key, abs_path, orig_path)
 
         try:
+            copied_assets = 0
+            asset_dests = []
+
+            def _copy_asset(rel_parts, fsrc):
+                nonlocal copied_assets
+                fdest = Path(MODULES_DIR).joinpath(*rel_parts)
+                fdest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(fsrc, fdest)
+                copied_assets += 1
+                return fdest
+
             if is_dir:
                 base_dest = dest_rel.rstrip("/")
                 for fsrc in py_files:
@@ -2493,6 +2529,9 @@ class Eidolon(cmd.Cmd):
                         continue
                     shutil.copy2(fsrc, fdest)
                     installed.append((key, str(fdest), str(fsrc)))
+                for fsrc in asset_files:
+                    rel_in_src = (Path(base_dest) / fsrc.relative_to(src_path)).parts
+                    asset_dests.append(_copy_asset(rel_in_src, fsrc))
             else:
                 dest_path = Path(MODULES_DIR) / dest_rel
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2501,16 +2540,30 @@ class Eidolon(cmd.Cmd):
                     return warn(f"'{key}' already registered — use --force to overwrite")
                 shutil.copy2(src_path, dest_path)
                 installed.append((key, str(dest_path), str(src_path)))
+                for fsrc in asset_files:
+                    rel_in_src = (dest_path.parent / fsrc.relative_to(src_path.parent)).parts
+                    asset_dests.append(_copy_asset(rel_in_src, fsrc))
 
         except Exception as e:
             return err(f"copy failed: {e}")
 
-        if not installed:
+        if not installed and not asset_files:
             return warn("nothing installed")
 
         for key, fp, orig in installed:
             self.trust_mgr.register_untrusted(key, fp, source="local", original=orig)
             ok(f"installed {C.CYAN}{key}{C.RESET} → {os.path.relpath(fp, MODULES_DIR)}")
+
+        if asset_files:
+            if copied_assets:
+                samples = sorted(os.path.relpath(str(f), MODULES_DIR) for f in asset_dests)
+                head = ", ".join(samples[:3]) + (" …" if len(samples) > 3 else "")
+                ok(f"bundled {copied_assets} asset file(s) alongside ({head})")
+            else:
+                warn("bundled asset files already present — left untouched")
+
+        if not installed:
+            return warn("no module(s) installed — asset files only")
 
         warn(f"{len(installed)} module(s) installed but UNTRUSTED")
         warn(f"inspect: {C.PINK}trusted --all{C.RESET}   trust: {C.PINK}trust <path>{C.RESET}")

@@ -13,6 +13,12 @@ trust ws-mtls-listener
 trust poly-builder
 ```
 
+`install_local` / `add_module` copy every active module's bundled assets too —
+non-`.py` files (e.g. `_src/implant.go`, `_src/implant.nim`) land next to the
+module file so builders can resolve them via `__eidolon_path__`; `__pycache__`,
+hidden files and `.pyc` are never copied. If the module file is already
+registered (no `--force`), copies are skipped but assets are still refreshed.
+
 (Or serve this repo as an index with `repo` and install both like any other
 remote module — TOFU applies either way.)
 
