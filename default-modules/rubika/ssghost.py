@@ -89,7 +89,7 @@ class _OX:
 BANNER = r"""
    ◼◼◼◼   ◼   ◼  ◼◼◼◼◼   ◼◼◼◼   ◼     ◼     OBSIDIAN VANGUARD
   ◼     ◼ ◼   ◼  ◼      ◼     ◼  ◼     ◼     the blade of Ghost Union
-  ◼     ◼ ◼   ◼  ◼◼◼◼   ◼     ◼  ◼     ◼     ssghost · v3.2.0
+  ◼     ◼ ◼   ◼  ◼◼◼◼   ◼     ◼  ◼     ◼     ssghost · v3.2.1
   ◼     ◼  ◼ ◼   ◼      ◼     ◼   ◼   ◼      forged in pressure
    ◼◼◼◼     ◼    ◼◼◼◼◼   ◼◼◼◼      ◼◼◼       first to engage
 """
@@ -100,7 +100,7 @@ TAGLINE = "Forged in pressure. Sharpened in silence. First to engage."
 #  Module metadata
 # ──────────────────────────────────────────────────────────────────────────────
 NAME        = "ssghost"
-VERSION     = "3.2.0"
+VERSION     = "3.2.1"
 DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable identity profiles), silence event messages during the pass, and purge every member in unlimited waves (admins & bots exempt, granular settings) via maxrubika"
 AUTHOR      = "null-flame"
 CATEGORY    = "social"
@@ -227,9 +227,9 @@ OPTIONS = {
         "desc":     "after the pass, lift every ban via unban_all_members (default ON — bans should not stick to the account)",
     },
     "dry_run": {
-        "value":    True,
+        "value":    False,
         "required": False,
-        "desc":     "simulate everything: show exactly what would happen, send nothing (recommended first pass)",
+        "desc":     "simulate everything: show exactly what would happen, send nothing (default OFF — engage is LIVE; set True for a rehearsal pass)",
     },
 }
 
@@ -264,7 +264,7 @@ _state = {
     "self_guid":      None,
     "profile":        "",
     "unban_after":    True,
-    "dry_run":        True,
+    "dry_run":        False,
     "stats": {
         "kind":        None,   # group | channel
         "guid":        None,
@@ -1195,7 +1195,7 @@ def run(opts):
         "trigger_requires_self": bool(opts.get("trigger_requires_self", True)),
         "profile":        str(opts.get("profile") or "").strip(),
         "unban_after":    bool(opts.get("unban_after", True)),
-        "dry_run":        bool(opts.get("dry_run", True)),
+        "dry_run":        bool(opts.get("dry_run", False)),
         "stats": {
             "kind": None, "guid": None, "members": 0, "admins": 0, "bots": 0,
             "banned": 0, "ban_failed": 0, "unbanned": 0,
@@ -1208,6 +1208,8 @@ def run(opts):
 
     if _state["dry_run"]:
         warn("DRY RUN is ON — engage simulates everything and sends nothing")
+    else:
+        warn("LIVE MODE — engage sends real API calls (bans are irreversible; set dry_run True for a rehearsal)")
 
     try:
         app = Messenger(session)
