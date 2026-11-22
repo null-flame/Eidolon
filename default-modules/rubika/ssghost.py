@@ -106,7 +106,7 @@ TAGLINE = "Forged in pressure. Sharpened in silence. First to engage."
 #  Module metadata
 # ──────────────────────────────────────────────────────────────────────────────
 NAME        = "ssghost"
-VERSION     = "3.3.1"
+VERSION     = "3.4.0"
 DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable profiles that also carry every granular chat setting), silence event messages during the pass, and purge every member in unlimited waves (admins & bots exempt, smart granular settings) via maxrubika"
 AUTHOR      = "null-flame"
 CATEGORY    = "social"
@@ -1239,15 +1239,43 @@ def run(opts):
     _state["client"] = app
 
     def _read_self_guid():
-        try:
-            me = app.get_me()
-        except Exception as e:
-            _o(f"{_OX.ASH}ℹ get_me failed ({e}) — session identity unavailable{_OX.RESET}")
-            return None
-        u = _get(me, "user")
-        return (_get(u, "guid") if u is not None else None) or _get(me, "guid") \
-            or _get(me, "user_guid") or _get(me, "object_guid")
+        last = None
+        for attempt in (1, 2, 3):
+            try:
+                me = app.get_me()
+            except Exception as e:
+                last = e
+                time.sleep(1.5 * attempt)
+                continue
+            u = _get(me, "user")
+            return ((_get(u, "guid") if u is not None else None) or _get(me, "guid")
+                    or _get(me, "user_guid") or _get(me, "object_guid"))
+        _o(f"{_OX.ASH}ℹ get_me failed ({last}) — session identity unavailable{_OX.RESET}")
+        _o(f"{_OX.ASH}  if this keeps saying INVALID_INPUT the session itself is not authenticated — delete the session file and 'run' again to log in fresh{_OX.RESET}")
+        return None
 
+    # listener first — app.run() performs start(): connect, handshake (sets the
+    # signing key) and, on a fresh session, the phone/code login prompts
+    _state["app_thread"] = threading.Thread(
+        target=app.run,
+        daemon=True,
+        name="ssghost-listener",
+    )
+    _state["app_thread"].start()
+
+    def _client_ready():
+        if not _state["app_thread"].is_alive():
+            return True
+        if not getattr(app, "connection", None):
+            return False
+        return bool(getattr(app, "decode_auth", None) or getattr(app, "import_key", None))
+
+    deadline = time.time() + 180.0
+    while not _client_ready() and time.time() < deadline:
+        time.sleep(0.5)
+    if not getattr(app, "connection", None):
+        warn("client never connected — engage will fail until the session authenticates")
+        warn("fix: delete the session file next to eidolon and 'run' again; then type phone + code at the prompts")
     _state["self_guid"] = _read_self_guid()
 
     # ── in-chat trigger — engage the chat the command was sent in ────────────
@@ -1309,14 +1337,6 @@ def run(opts):
             daemon=True,
             name="ssghost-engage",
         ).start()
-
-    # ───────────────────────────────────────────────── background listener ───────────────────────────────────────────────────
-    _state["app_thread"] = threading.Thread(
-        target=app.run,
-        daemon=True,
-        name="ssghost-listener",
-    )
-    _state["app_thread"].start()
 
     # ── Obsidian Vanguard boot splash ─────────────────────────────────────────
     if _state["profile"]:

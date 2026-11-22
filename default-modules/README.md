@@ -65,7 +65,7 @@ The framework installs nothing, ever. Each module guards its own imports:
 - `poly-builder` + `lang=go`: a Go toolchain (`go` on PATH; stdlib-only implant, cross-compiles natively)
 - `poly-builder` + `lang=nim`: the Nim toolchain (`nim` on PATH; build flags include `-d:ssl` — Windows targets need the OpenSSL binaries next to the artifact or in the search path)
 - nim cross-compiling linux→windows is refused with guidance; build on the target OS or wire a cross toolchain yourself
-- `rubika_member_transfer` + `ssghost`: a maxrubika session (`pip install maxrubika`)
+- `rubika_member_transfer` + `ssghost`: a maxrubika session (`pip install 'maxrubika>=1.18.1'`) — ssghost starts the listener (handshake/login) before any identity call, retries `get_me`, and points at the session file if the session never authenticates (`INVALID_INPUT` / `import_key` errors)
 
 ## Wire protocol (`ws-json-mtls/1`)
 
