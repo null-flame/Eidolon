@@ -1904,6 +1904,27 @@ def _ship_declared_assets(fsrc, fdest_base, key):
     return dests
 
 
+def _split_semicolons(raw):
+    """Split a command line on ';', but never inside quotes.
+    'set a a; set b b; set name test;' -> three commands (trailing ';' = no tail)."""
+    parts, buf, quote = [], [], None
+    for ch in raw:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+        elif ch == ";":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    return [p for p in (s.strip() for s in parts) if p]
+
+
 class Eidolon(cmd.Cmd):
     intro = ""
     use_rawinput = True
@@ -3024,9 +3045,18 @@ class Eidolon(cmd.Cmd):
 
     def do_set(self, arg):
         if not self.current: return err("no module selected.")
+        segments = _split_semicolons(arg)
+        if not segments: return err("usage: set <name> <value> [...; set <name> <value>; ...] — several sets in one line, ';' separated")
+        for seg in segments:
+            words = seg.split(None, 1)
+            if words and words[0].lower() == "set":
+                seg = words[1] if len(words) > 1 else ""
+            self._set_one(seg)
+
+    def _set_one(self, arg):
         try: parts = shlex.split(arg)
         except ValueError as e: return err(f"parse error: {e}")
-        if len(parts) < 2: return err("usage: set <name> <value>")
+        if len(parts) < 2: return err("usage: set <name> <value> [...; set <name> <value>; ...] — several sets in one line, ';' separated")
         key, val = parts[0], " ".join(parts[1:])
         if key not in self.current_options: return err(f"unknown option: {key}")
         old = self.current_options[key].get("value")
