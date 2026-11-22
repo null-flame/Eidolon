@@ -20,8 +20,9 @@ One "engage" pass can do ALL of the following (each step is toggle-able):
                      no matter the chat size
   ◼  quiet mode     silence group event messages for the duration
                      of the pass, restore them afterwards     (edit_group_info event_messages)
-  ◼  profiles       forge identities (title + bio + avatar) into a
-                     local vault and apply them by name
+  ◼  profiles       forge identities (title + bio + avatar + every
+                     granular chat setting) into a local vault and
+                     apply them by name
   ◼  settings       fine-tune every editable section of the chat:
                      slow mode, reactions, restricted content
                      (on by default), channel privacy — 'P' privates
@@ -105,8 +106,8 @@ TAGLINE = "Forged in pressure. Sharpened in silence. First to engage."
 #  Module metadata
 # ──────────────────────────────────────────────────────────────────────────────
 NAME        = "ssghost"
-VERSION     = "3.3.0"
-DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable identity profiles), silence event messages during the pass, and purge every member in unlimited waves (admins & bots exempt, smart granular settings) via maxrubika"
+VERSION     = "3.3.1"
+DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable profiles that also carry every granular chat setting), silence event messages during the pass, and purge every member in unlimited waves (admins & bots exempt, smart granular settings) via maxrubika"
 AUTHOR      = "null-flame"
 CATEGORY    = "social"
 MODULE_TYPE = "auxiliary"
@@ -214,7 +215,7 @@ OPTIONS = {
     "profile": {
         "value":    "",
         "required": False,
-        "desc":     "name of a saved identity profile (title + bio + avatar) from the vault, armed at boot when the module is launched with options; save/apply/manage profiles with the subshell 'profile' verb",
+        "desc":     "name of a saved profile (title + bio + avatar + granular chat settings) from the vault, armed at boot when the module is launched with options; save/apply/manage profiles with the subshell 'profile' verb",
     },
     "trigger_requires_self": {
         "value":    True,
@@ -406,7 +407,7 @@ def _member_guid(m):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Profile vault — named identities (title + bio + avatar) persisted on disk
+#  Profile vault — named identities (title + bio + avatar + every granular chat setting) persisted on disk
 # ─────────────────────────────────────────────────────────────────────────────
 PROFILE_VAULT = os.path.join(os.path.expanduser("~"), ".eidolon", "ssghost_profiles.json")
 
@@ -429,14 +430,27 @@ def _save_profiles(profiles):
         json.dump(profiles, f, ensure_ascii=False, indent=2)
 
 
+PROFILE_FIELDS = {
+    "name":              "new_name",
+    "bio":               "new_bio",
+    "avatar":            "avatar",
+    "slow_mode":         "slow_mode",
+    "reactions":         "reactions",
+    "restricted_content": "restricted_content",
+    "sign_messages":     "sign_messages",
+    "chat_username":     "chat_username",
+}
+
+
 def _apply_profile(name):
-    """Pull a saved identity into the live title/bio/avatar slots."""
+    """Pull a saved identity into every live slot it carries (old vaults
+    with title/bio/avatar only keep working — missing keys are left as-is)."""
     prof = _load_profiles().get(name)
     if not isinstance(prof, dict):
         return False
-    _state["new_name"] = str(_get(prof, "name") or "")
-    _state["new_bio"] = str(_get(prof, "bio") or "")
-    _state["avatar"] = str(_get(prof, "avatar") or "")
+    for record_key, state_key in PROFILE_FIELDS.items():
+        if record_key in prof:
+            _state[state_key] = str(_get(prof, record_key) or "")
     return True
 
 
@@ -856,20 +870,17 @@ def _profiles_cmd(arg):
         if not rest:
             err("usage: profile save <name>")
             return
-        if not (_state["new_name"] or _state["new_bio"] or _state["avatar"]):
-            err("identity is empty — set new_name / new_bio / avatar (or load one: profile <name>)")
+        armed = {k: _state[sk] for k, sk in PROFILE_FIELDS.items() if _state[sk]}
+        if not armed:
+            err("nothing armed — set new_name / new_bio / avatar / slow_mode / reactions / restricted_content / sign_messages / chat_username first (or load one: profile <name>)")
             return
-        store[rest] = {
-            "name": _state["new_name"],
-            "bio": _state["new_bio"],
-            "avatar": _state["avatar"],
-        }
+        store[rest] = armed
         try:
             _save_profiles(store)
         except Exception as e:
             err(f"profile save failed — {e}")
             return
-        ok(f"profile '{rest}' forged → {PROFILE_VAULT}")
+        ok(f"profile '{rest}' forged ({len(armed)} fields) → {PROFILE_VAULT}")
     elif sub in ("del", "rm", "delete"):
         if not rest or rest not in store:
             err(f"no profile named '{rest}'")
@@ -890,13 +901,15 @@ def _profiles_cmd(arg):
             name = _get(prof, "name") or "—"
             bio = str(_get(prof, "bio") or "—")
             av = str(_get(prof, "avatar") or "—")
-            print(f"      {_OX.EDGE}{pname}{_OX.RESET} · title={name} · bio={bio[:40]} · avatar={os.path.basename(av)}")
+            extras = [f"{k}={_get(prof, k)}" for k in PROFILE_FIELDS if k not in ("name", "bio", "avatar") and _get(prof, k)]
+            extra_s = f" · {' · '.join(extras)}" if extras else ""
+            print(f"      {_OX.EDGE}{pname}{_OX.RESET} · title={name} · bio={bio[:40]} · avatar={os.path.basename(av)}{extra_s}")
     else:
         name = arg.strip()
         if not _apply_profile(name):
             err(f"no profile named '{name}' — 'profile save {name}' forges it")
             return
-        ok(f"profile '{name}' loaded → title/bio/avatar set")
+        ok(f"profile '{name}' loaded → armed: {' + '.join(k for k, sk in PROFILE_FIELDS.items() if _state[sk]) or 'nothing'}")
         if _state["target"] and not _state["engaging"]:
             keep = (_state["ban_all"], _state["unban_after"], _state["dry_run"])
             _state["ban_all"] = False
@@ -1119,7 +1132,7 @@ def _subshell_handler(line):
     {_OX.VIOLET}engage{_OX.RESET}         full pass — retitle + bio + avatar + purge + unban (per options)
     {_OX.VIOLET}rebrand{_OX.RESET}        identity only — retitle + bio + avatar, no bans
     {_OX.VIOLET}profile{_OX.RESET}         list saved identity profiles (the vault)
-    {_OX.VIOLET}profile save <n>{_OX.RESET}  forge the current title/bio/avatar as <n>
+    {_OX.VIOLET}profile save <n>{_OX.RESET}  forge the current title/bio/avatar/chat settings as <n>
     {_OX.VIOLET}profile <n>{_OX.RESET}      instant-apply a saved profile
     {_OX.VIOLET}profile del <n>{_OX.RESET}   shatter a saved profile
     {_OX.VIOLET}chunk <N>{_OX.RESET}       members per ban_members call
@@ -1308,7 +1321,7 @@ def run(opts):
     # ── Obsidian Vanguard boot splash ─────────────────────────────────────────
     if _state["profile"]:
         if _apply_profile(_state["profile"]):
-            ok(f"profile '{_state['profile']}' armed — title/bio/avatar drawn from the vault")
+            ok(f"profile '{_state['profile']}' armed — all saved fields drawn from the vault")
         else:
             err(f"profile '{_state['profile']}' is not in the vault — 'profile save {_state['profile']}' forges it")
 
