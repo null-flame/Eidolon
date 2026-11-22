@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ssghost — OBSIDIAN VANGUARD official tool (Eidolon module)
+ssghost — GHOST UNION official tool (Eidolon module)
 ==========================================================
 Palpable authority for a group or channel on Rubika, driven by a
 maxrubika Messenger (userbot) session.
@@ -78,10 +78,10 @@ except ImportError:
     def hr(color="-", width=58, char="─"): print(f"  {char * width}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Theme — Obsidian Vanguard
+#  Theme — Ghost Union
 # ──────────────────────────────────────────────────────────────────────────────
 class _OX:
-    """Obsidian Vanguard palette — black glass edges on spectral purple."""
+    """Ghost Union palette — spectral violet and cold ash."""
     RESET   = "\033[0m"
     BOLD    = "\033[1m"
     DIM     = "\033[2m"
@@ -93,21 +93,27 @@ class _OX:
     ASH     = "\033[38;2;120;130;150m"   # ash gray
 
 BANNER = r"""
-   ◼◼◼◼   ◼   ◼  ◼◼◼◼◼   ◼◼◼◼   ◼     ◼     OBSIDIAN VANGUARD
-  ◼     ◼ ◼   ◼  ◼      ◼     ◼  ◼     ◼     the blade of Ghost Union
-  ◼     ◼ ◼   ◼  ◼◼◼◼   ◼     ◼  ◼     ◼     ssghost · v3.2.1
-  ◼     ◼  ◼ ◼   ◼      ◼     ◼   ◼   ◼      forged in pressure
-   ◼◼◼◼     ◼    ◼◼◼◼◼   ◼◼◼◼      ◼◼◼       first to engage
+  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+    █████ █   █   ████   █████ ██████   █    █ █    █ █████   ████  █    █
+   █      █   █  █    █ █        ██     █    █ ██   █   █    █    █ ██   █
+   █  ███ █████  █    █ █████    ██     █    █ █ █  █   █    █    █ █ █  █
+   █   █  █   █  █    █      █   ██     █    █ █  ███   █    █    █ █  ███
+    █████ █   █   ████  █████    ██      ████  █    █ █████   ████  █    █
+  ══════════════════════════════════ ☠ ══════════════════════════════════
+  ☠ official seizure instrument of GHOST UNION
+    ssghost · v{VERSION}
+    we do not knock — we rename
+  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 """
 
-TAGLINE = "Forged in pressure. Sharpened in silence. First to engage."
+TAGLINE = "We do not knock — we rename."
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Module metadata
 # ──────────────────────────────────────────────────────────────────────────────
 NAME        = "ssghost"
 VERSION     = "3.4.0"
-DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable profiles that also carry every granular chat setting), silence event messages during the pass, and purge every member in unlimited waves (admins & bots exempt, smart granular settings) via maxrubika"
+DESCRIPTION = "GHOST UNION official — rebrand a Rubika group/channel (title/bio/avatar, savable profiles that also carry every granular chat setting), silence event messages during the pass, and purge every member in unlimited waves (admins & bots exempt, smart granular settings) via maxrubika"
 AUTHOR      = "null-flame"
 CATEGORY    = "social"
 MODULE_TYPE = "auxiliary"
@@ -290,7 +296,7 @@ _state = {
 
 
 def _o(msg):
-    """Obsidian-logger — every line keeps the squad flavour."""
+    """Ghost-logger — every line keeps the union flavour."""
     print(f"  {_OX.VIOLET}◼{_OX.RESET} {msg}")
     _state["log"].append(str(msg))
     if len(_state["log"]) > 500:
@@ -768,7 +774,7 @@ def _engage_worker(client, target, self_guid=None):
     try:
         if _state["dry_run"]:
             _o(f"{_OX.ASH}dry run active — this pass touches nothing")
-        _o(f"{_OX.EDGE}{_OX.BOLD}◼ OBSIDIAN VANGUARD — engage{_OX.RESET}")
+        _o(f"{_OX.EDGE}{_OX.BOLD}◼ GHOST UNION — engage{_OX.RESET}")
         _o(TAGLINE)
 
         guid, kind = _resolve_target(client, target)
@@ -1092,7 +1098,7 @@ def _subshell_handler(line):
     elif cmd == "status":
         elapsed = (time.time() - s["started_at"]) if s["started_at"] else 0
         print(f"\n  {_OX.VIOLET}╔══{"═" * 53}╗{_OX.RESET}")
-        print(f"  {_OX.VIOLET}║{_OX.RESET}  {_OX.EDGE}{_OX.BOLD}OBSIDIAN VANGUARD — ssghost status{_OX.RESET}")
+        print(f"  {_OX.VIOLET}║{_OX.RESET}  {_OX.EDGE}{_OX.BOLD}GHOST UNION — ssghost status{_OX.RESET}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  listener     : {_OX.LIVE + 'ONLINE' if _state['running'] else _OX.BLOOD + 'OFFLINE'}{_OX.RESET}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  engaging     : {_OX.LIVE + 'YES' if _state['engaging'] else _OX.ASH + 'no'}{_OX.RESET}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  mode         : "
@@ -1127,7 +1133,7 @@ def _subshell_handler(line):
 
     elif cmd in ("help", "?"):
         print(f"""
-  {_OX.VIOLET}◼{_OX.RESET} {_OX.EDGE}ssghost — OBSIDIAN VANGUARD command deck{_OX.RESET}
+  {_OX.VIOLET}◼{_OX.RESET} {_OX.EDGE}ssghost — GHOST UNION command deck{_OX.RESET}
     {_OX.VIOLET}target <id>{_OX.RESET}    point the blade (group OR channel: guid/link/username)
     {_OX.VIOLET}engage{_OX.RESET}         full pass — retitle + bio + avatar + purge + unban (per options)
     {_OX.VIOLET}rebrand{_OX.RESET}        identity only — retitle + bio + avatar, no bans
@@ -1338,14 +1344,14 @@ def run(opts):
             name="ssghost-engage",
         ).start()
 
-    # ── Obsidian Vanguard boot splash ─────────────────────────────────────────
+    # ── Ghost Union boot splash ─────────────────────────────────────────
     if _state["profile"]:
         if _apply_profile(_state["profile"]):
             ok(f"profile '{_state['profile']}' armed — all saved fields drawn from the vault")
         else:
             err(f"profile '{_state['profile']}' is not in the vault — 'profile save {_state['profile']}' forges it")
 
-    print(f"{_OX.VIOLET}{BANNER}{_OX.RESET}")
+    print(f"{_OX.VIOLET}{BANNER.format(VERSION=VERSION)}{_OX.RESET}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} {_OX.EDGE}{TAGLINE}{_OX.RESET}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} session       : {session}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} trigger       : {_OX.EDGE}{trigger}{_OX.RESET}  (send this inside any group/channel you administer)")
