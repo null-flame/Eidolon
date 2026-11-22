@@ -23,8 +23,13 @@ One "engage" pass can do ALL of the following (each step is toggle-able):
   ◼  profiles       forge identities (title + bio + avatar) into a
                      local vault and apply them by name
   ◼  settings       fine-tune every editable section of the chat:
-                     slow mode, reactions, restricted content,
-                     channel username/type, signed messages
+                     slow mode, reactions, restricted content
+                     (on by default), channel privacy — 'P' privates
+                     the channel, any other name becomes the public
+                     username with a random 3-4 digit code appended —
+                     and signed posts (off by default); every field
+                     is attempted on its own, a refusal never stops
+                     the pass
 
 Works identically for GROUPS (g0) and CHANNELS (c0) — the module
 detects the chat kind and routes to the matching maxrubika API.
@@ -100,8 +105,8 @@ TAGLINE = "Forged in pressure. Sharpened in silence. First to engage."
 #  Module metadata
 # ──────────────────────────────────────────────────────────────────────────────
 NAME        = "ssghost"
-VERSION     = "3.2.1"
-DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable identity profiles), silence event messages during the pass, and purge every member in unlimited waves (admins & bots exempt, granular settings) via maxrubika"
+VERSION     = "3.3.0"
+DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable identity profiles), silence event messages during the pass, and purge every member in unlimited waves (admins & bots exempt, smart granular settings) via maxrubika"
 AUTHOR      = "null-flame"
 CATEGORY    = "social"
 MODULE_TYPE = "auxiliary"
@@ -187,24 +192,19 @@ OPTIONS = {
         "desc":     "group only: reactions setting — All / Disable / comma-separated ids (empty = untouched)",
     },
     "restricted_content": {
-        "value":    "",
+        "value":    "on",
         "required": False,
-        "desc":     "group & channel: is_restricted_content True/False — blocks screenshots and file saving (empty = untouched)",
+        "desc":     "group & channel, default 'on': is_restricted_content blocks screenshots and file saving — 'on' enables, 'off' disables, 'skip' = untouched; applied on its own, a refused field never stops the pass",
     },
     "sign_messages": {
-        "value":    "",
+        "value":    "off",
         "required": False,
-        "desc":     "channel only: sign every post with the channel name True/False (empty = untouched)",
+        "desc":     "channel only, default 'off': sign every post with the channel name — 'off' disables signing, 'on' enables, 'skip' = untouched; applied on its own, a refused field never stops the pass",
     },
     "chat_username": {
         "value":    "",
         "required": False,
-        "desc":     "channel only: public username, max 32 chars (empty = untouched)",
-    },
-    "channel_type": {
-        "value":    "",
-        "required": False,
-        "desc":     "channel only: Public or Private (empty = untouched)",
+        "desc":     "channel only, one smart field: 'P' = switch the channel to Private; any other text = public username base — a random 3-4 digit code is appended and applied (e.g. 'Ghost_union' -> 'Ghost_union734', max 32 chars); empty = untouched",
     },
     "quiet_mode": {
         "value":    True,
@@ -214,7 +214,7 @@ OPTIONS = {
     "profile": {
         "value":    "",
         "required": False,
-        "desc":     "name of a saved identity profile (title + bio + avatar) to arm at boot",
+        "desc":     "name of a saved identity profile (title + bio + avatar) from the vault, armed at boot when the module is launched with options; save/apply/manage profiles with the subshell 'profile' verb",
     },
     "trigger_requires_self": {
         "value":    True,
@@ -255,10 +255,9 @@ _state = {
     "ban_delay":      2.0,
     "slow_mode":      "",
     "reactions":      "",
-    "restricted_content": "",
-    "sign_messages":  "",
+    "restricted_content": "on",
+    "sign_messages":  "off",
     "chat_username":  "",
-    "channel_type":   "",
     "quiet_mode":     True,
     "trigger_requires_self": True,
     "self_guid":      None,
@@ -542,12 +541,22 @@ def _avatar_path(p):
     return os.path.expanduser(str(p or "").strip().strip("'\"").strip())
 
 
-def _opt_bool(raw):
-    """''/empty → None (untouched); 'true'/'1'/'yes'/'on' → True; else False."""
+def _tri_state(raw):
+    """Operator input → 'on' / 'off' / 'skip' (untouched)."""
     s = str(raw or "").strip().lower()
-    if not s:
-        return None
-    return s in ("true", "1", "yes", "on")
+    if s in ("on", "true", "1", "yes"):
+        return "on"
+    if s in ("off", "false", "0", "no"):
+        return "off"
+    return "skip"
+
+
+def _username_code(base):
+    """Public-username base → base + a random 3-4 digit code, capped at 32 chars."""
+    n = random.choice((3, 4))
+    code = str(random.randint(10 ** (n - 1), 10 ** n - 1))
+    room = 32 - len(code)
+    return base[:room] + code
 
 
 def _blade_settings(client, guid, kind):
@@ -570,7 +579,7 @@ def _blade_settings(client, guid, kind):
             err(f"{what} refused — passing without it ({e})")
             s["settings_failed"] += 1
 
-    restricted = _opt_bool(_state["restricted_content"])
+    restricted = _tri_state(_state["restricted_content"])
     if kind == "group":
         mode = str(_state["slow_mode"]).strip()
         if mode:
@@ -587,28 +596,25 @@ def _blade_settings(client, guid, kind):
                 apply(f"reactions=ids:{rx}", lambda: client.edit_group_info(guid, reactions=ids))
             else:
                 warn("reactions must be All / Disable / comma-separated ids — skipped")
-        if restricted is not None:
+        if restricted != "skip":
             apply(f"is_restricted_content={restricted}",
-                  lambda: client.edit_group_info(guid, is_restricted_content=restricted))
+                  lambda: client.edit_group_info(guid, is_restricted_content=(restricted == "on")))
     else:
-        user = str(_state["chat_username"]).strip().lstrip("@")
-        if user:
-            if len(user) > 32:
-                warn("channel username exceeds Rubika's 32-char limit — truncating")
-                user = user[:32]
-            apply(f"username={user}", lambda: client.edit_channel_info(guid, username=user))
-        ct = str(_state["channel_type"]).strip().capitalize()
-        if ct:
-            if ct not in ("Public", "Private"):
-                warn("channel_type must be Public or Private — skipped")
+        raw = str(_state["chat_username"]).strip().lstrip("@")
+        if raw.lower() == "p":
+            apply("channel_type=Private", lambda: client.edit_channel_info(guid, channel_type="Private"))
+        elif raw:
+            if not all(ch.isalnum() or ch == "_" for ch in raw):
+                warn("username may only contain letters, digits and '_' — skipped")
             else:
-                apply(f"channel_type={ct}", lambda: client.edit_channel_info(guid, channel_type=ct))
-        sign = _opt_bool(_state["sign_messages"])
-        if sign is not None:
-            apply(f"sign_messages={sign}", lambda: client.edit_channel_info(guid, sign_messages=sign))
-        if restricted is not None:
+                user = _username_code(raw)
+                apply(f"username={user}", lambda: client.edit_channel_info(guid, username=user))
+        sign = _tri_state(_state["sign_messages"])
+        if sign != "skip":
+            apply(f"sign_messages={sign}", lambda: client.edit_channel_info(guid, sign_messages=(sign == "on")))
+        if restricted != "skip":
             apply(f"is_restricted_content={restricted}",
-                  lambda: client.edit_channel_info(guid, is_restricted_content=restricted))
+                  lambda: client.edit_channel_info(guid, is_restricted_content=(restricted == "on")))
 
 
 def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rounds, seen):
@@ -766,8 +772,9 @@ def _engage_worker(client, target, self_guid=None):
             blades.append("re-bio")
         if _state["avatar"]:
             blades.append("avatar")
-        if any((_state["slow_mode"], _state["reactions"], _state["restricted_content"],
-                _state["sign_messages"], _state["chat_username"], _state["channel_type"])):
+        if any((_state["slow_mode"], _state["reactions"], _state["chat_username"],
+                _tri_state(_state["restricted_content"]) != "skip",
+                _tri_state(_state["sign_messages"]) != "skip")):
             blades.append("settings")
         if _state["ban_all"]:
             blades.append("purge")
@@ -1042,10 +1049,9 @@ def _subshell_handler(line):
             ("quiet (event messages off during pass)", _state["quiet_mode"]),
             ("slow_mode secs (group)", _state["slow_mode"] or "(untouched)"),
             ("reactions (group)", _state["reactions"] or "(untouched)"),
-            ("restricted content (group/channel)", _state["restricted_content"] or "(untouched)"),
-            ("sign messages (channel)", _state["sign_messages"] or "(untouched)"),
-            ("username (channel)", _state["chat_username"] or "(untouched)"),
-            ("channel type (channel)", _state["channel_type"] or "(untouched)"),
+            ("restricted content (group/channel)", _tri_state(_state["restricted_content"])),
+            ("sign messages (channel)", _tri_state(_state["sign_messages"])),
+            ("channel privacy/username (channel)", _state["chat_username"] or "(untouched) — 'P' = private"),
             ("ban waves", "∞ — until the purge list is empty" if _state["ban_all"] else "off"),
             ("ban chunk / delay", f"{_state['ban_chunk']} members / {_state['ban_delay']}s"),
             ("protect admins / bots", f"{_state['protect_admins']} / {_state['protect_bots']}"),
@@ -1190,7 +1196,6 @@ def run(opts):
         "restricted_content": str(opts.get("restricted_content") or "").strip(),
         "sign_messages":  str(opts.get("sign_messages") or "").strip(),
         "chat_username":  str(opts.get("chat_username") or "").strip().lstrip("@"),
-        "channel_type":   str(opts.get("channel_type") or "").strip(),
         "quiet_mode":     bool(opts.get("quiet_mode", True)),
         "trigger_requires_self": bool(opts.get("trigger_requires_self", True)),
         "profile":        str(opts.get("profile") or "").strip(),
