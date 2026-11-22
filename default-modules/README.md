@@ -34,7 +34,7 @@ remote module — TOFU applies either way.)
 | `ws-mtls-listener` | listener — WebSocket over TLS (`wss`), mTLS implants, publishes a build profile |
 | `poly-builder` | payload — renders + compiles the bundled implants (`_src/implant.go`, `_src/implant.nim`), registers the artifact |
 | `rubika_member_transfer` | auxiliary — Rubika messenger ops on a maxrubika userbot session: transfer members between your groups and channels (group/channel in and out), view members (`view <id>` with channel pagination), chat info (`info <id>`, `whoami`); inner subshell, `/setsource` / `/settarget` / `/transfer` triggers in chat |
-| `ssghost` | auxiliary — OBSIDIAN VANGUARD official: one engage pass rewrites a Rubika group/channel identity (title, bio, avatar wipe + upload) and purges every member while exempting admins, bots and the session itself; the purge runs in waves (each wave re-reads the member list, sweeping large chats past the ~100-member fetch cap) with a configurable chunk size, can silence group event messages for the pass (`quiet_mode`, restored after) and optionally auto-unban (`unban_after`); identities (title + bio + avatar) save to a local profile vault and apply by name (`profile save <n>` / `profile <n>`); defaults to DRY RUN, `real` goes live; subshell `target / engage / rebrand / profile / chunk / rounds / quiet / real / unban / banned / admins` + in-chat trigger `/ssghost` (full pass) or `/ssghost <profile>` (identity pass, session-owner gated); works on `g0` and `c0` alike |
+| `ssghost` | auxiliary — OBSIDIAN VANGUARD official: one engage pass rewrites a Rubika group/channel identity (title, bio, avatar wipe + upload), fine-tunes every editable section (group: slow mode, reactions, restricted content; channel: username, Public/Private, signed messages, restricted content — each field applied on its own, a refused field never stops the pass) and purges every member while exempting admins, bots and the session itself; the ban engine runs unlimited waves until the purge list is empty (any chat size is swept past the ~100-member fetch cap; a no-progress fuse stops the loop) with a configurable chunk size (`chunk`); group event messages are silenced for the pass by default (`quiet_mode=True`, restored after, graceful without permission) and every ban is lifted when the pass ends (`unban_after=True` by default); identities (title + bio + avatar) save to a local profile vault and apply by name (`profile save <n>` / `profile <n>`); `dry_run` is OFF by default (LIVE — every `engage` fires for real; `set dry_run True` for a rehearsal pass); subshell `target / engage / rebrand / profile / chunk / settings / quiet / real / unban / banned / admins` + in-chat trigger `/ssghost` (full pass) or `/ssghost <profile>` (identity pass, session-owner gated); works on `g0` and `c0` alike |
 
 Operator flow end to end:
 
@@ -115,8 +115,10 @@ sent over the wire that the implant could not have read from its own binary.
 - `rubika_member_transfer`: `py_compile` clean; import smoke-tested with a
   stub maxrubika client (channel pagination via `start_id`, bot/dup filtering,
   batched `add_members`, subshell commands).
-- `ssghost`: `py_compile` clean; smoke-tested with a stub maxrubika client
-  (dry-run gatekeeping, live group/channel purge, chunked bans, wave
-  re-scan loop termination, `event_messages=False`→`True` quiet cycle,
-  profile vault save/apply/del, trigger parsing incl. `/ssghost <profile>`,
-  chunk/rounds/quiet knobs, 50-wave cap + rate-limit guard).
+- `ssghost`: `py_compile` clean; smoke-tested (19 cases) with a stub maxrubika client:
+  dry-run gatekeeping, live group/channel purge, chunked bans, unlimited-wave
+  termination + no-progress fuse, rate-limit guard, `event_messages=False`→`True`
+  quiet cycle (default ON, graceful without permission), granular settings blade
+  for group and channel fields incl. refusals and 32-char username truncation,
+  profile vault save/apply/del, trigger parsing incl. `/ssghost <profile>` negatives,
+  chunk/quiet knobs, avatar path hygiene (quotes, `~`).

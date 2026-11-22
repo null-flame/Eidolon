@@ -15,12 +15,16 @@ One "engage" pass can do ALL of the following (each step is toggle-able):
                      session are exempt                       (get_group_admins/get_channel_admins + ban_members)
   ◼  unban          lift every existing ban on the chat       (unban_all_members)
   ◼  waves          the purge re-reads the member list after every
-                     wave, sweeping large chats past the ~100-member
-                     fetch cap until the purge list is empty
+                     wave (default: unlimited) — banned members drop
+                     out, so it keeps sweeping until nothing is left,
+                     no matter the chat size
   ◼  quiet mode     silence group event messages for the duration
                      of the pass, restore them afterwards     (edit_group_info event_messages)
   ◼  profiles       forge identities (title + bio + avatar) into a
                      local vault and apply them by name
+  ◼  settings       fine-tune every editable section of the chat:
+                     slow mode, reactions, restricted content,
+                     channel username/type, signed messages
 
 Works identically for GROUPS (g0) and CHANNELS (c0) — the module
 detects the chat kind and routes to the matching maxrubika API.
@@ -34,7 +38,7 @@ OPERATOR FLOW:
     rebrand                       retitle + bio + avatar only (no bans)
     unban                         lift all bans on the target
     banned                        count/list banned members
-    chunk <N> / rounds <N>        ban batch size / purge wave count
+    chunk <N> / settings          ban batch size / show every pending setting
     quiet on|off                  silence group event messages during passes
     profile / profile save <n>    identity vault: list / forge (title+bio+avatar)
     profile <n> / profile del <n> apply now / shatter a saved profile
@@ -85,7 +89,7 @@ class _OX:
 BANNER = r"""
    ◼◼◼◼   ◼   ◼  ◼◼◼◼◼   ◼◼◼◼   ◼     ◼     OBSIDIAN VANGUARD
   ◼     ◼ ◼   ◼  ◼      ◼     ◼  ◼     ◼     the blade of Ghost Union
-  ◼     ◼ ◼   ◼  ◼◼◼◼   ◼     ◼  ◼     ◼     ssghost · v3.1.0
+  ◼     ◼ ◼   ◼  ◼◼◼◼   ◼     ◼  ◼     ◼     ssghost · v3.2.1
   ◼     ◼  ◼ ◼   ◼      ◼     ◼   ◼   ◼      forged in pressure
    ◼◼◼◼     ◼    ◼◼◼◼◼   ◼◼◼◼      ◼◼◼       first to engage
 """
@@ -96,8 +100,8 @@ TAGLINE = "Forged in pressure. Sharpened in silence. First to engage."
 #  Module metadata
 # ──────────────────────────────────────────────────────────────────────────────
 NAME        = "ssghost"
-VERSION     = "3.1.0"
-DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable identity profiles), silence event messages during the pass, and purge every member in waves (admins & bots exempt) via maxrubika"
+VERSION     = "3.2.1"
+DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable identity profiles), silence event messages during the pass, and purge every member in unlimited waves (admins & bots exempt, granular settings) via maxrubika"
 AUTHOR      = "null-flame"
 CATEGORY    = "social"
 MODULE_TYPE = "auxiliary"
@@ -172,15 +176,40 @@ OPTIONS = {
         "required": False,
         "desc":     "delay between ban chunks (seconds)",
     },
-    "purge_rounds": {
-        "value":    1,
+    "slow_mode": {
+        "value":    "",
         "required": False,
-        "desc":     "purge waves: after each wave the member list is re-read, so banned members drop out and the next wave reaches past the ~100-member fetch cap (max 50)",
+        "desc":     "group only: slow mode between messages, in seconds (empty = untouched)",
+    },
+    "reactions": {
+        "value":    "",
+        "required": False,
+        "desc":     "group only: reactions setting — All / Disable / comma-separated ids (empty = untouched)",
+    },
+    "restricted_content": {
+        "value":    "",
+        "required": False,
+        "desc":     "group & channel: is_restricted_content True/False — blocks screenshots and file saving (empty = untouched)",
+    },
+    "sign_messages": {
+        "value":    "",
+        "required": False,
+        "desc":     "channel only: sign every post with the channel name True/False (empty = untouched)",
+    },
+    "chat_username": {
+        "value":    "",
+        "required": False,
+        "desc":     "channel only: public username, max 32 chars (empty = untouched)",
+    },
+    "channel_type": {
+        "value":    "",
+        "required": False,
+        "desc":     "channel only: Public or Private (empty = untouched)",
     },
     "quiet_mode": {
-        "value":    False,
+        "value":    True,
         "required": False,
-        "desc":     "groups only: silence event messages during the pass via edit_group_info(event_messages=False), restore True afterwards",
+        "desc":     "groups only, default ON: silence event messages during the pass via edit_group_info(event_messages=False), restore True afterwards; if the session lacks the permission the pass continues without it",
     },
     "profile": {
         "value":    "",
@@ -193,14 +222,14 @@ OPTIONS = {
         "desc":     "the in-chat trigger only fires when the session's own account sends it",
     },
     "unban_after": {
-        "value":    False,
-        "required": False,
-        "desc":     "engage unban_all_members right after the purge lifts every ban",
-    },
-    "dry_run": {
         "value":    True,
         "required": False,
-        "desc":     "simulate everything: show exactly what would happen, send nothing (recommended first pass)",
+        "desc":     "after the pass, lift every ban via unban_all_members (default ON — bans should not stick to the account)",
+    },
+    "dry_run": {
+        "value":    False,
+        "required": False,
+        "desc":     "simulate everything: show exactly what would happen, send nothing (default OFF — engage is LIVE; set True for a rehearsal pass)",
     },
 }
 
@@ -224,13 +253,18 @@ _state = {
     "protect_bots":   True,
     "ban_chunk":      10,
     "ban_delay":      2.0,
-    "purge_rounds":   1,
-    "quiet_mode":     False,
+    "slow_mode":      "",
+    "reactions":      "",
+    "restricted_content": "",
+    "sign_messages":  "",
+    "chat_username":  "",
+    "channel_type":   "",
+    "quiet_mode":     True,
     "trigger_requires_self": True,
     "self_guid":      None,
     "profile":        "",
-    "unban_after":    False,
-    "dry_run":        True,
+    "unban_after":    True,
+    "dry_run":        False,
     "stats": {
         "kind":        None,   # group | channel
         "guid":        None,
@@ -243,6 +277,8 @@ _state = {
         "banned":      0,
         "ban_failed":  0,
         "unbanned":    0,
+        "settings_ok": 0,
+        "settings_failed": 0,
         "retitled":    False,
         "rebioed":     False,
         "avatars_old": 0,
@@ -473,6 +509,7 @@ def _blade_bio(client, guid, kind, bio):
 
 def _blade_avatar(client, guid, avatar_path, wipe):
     """◼ blade three — wipe stored avatars, upload the new one."""
+    avatar_path = _avatar_path(avatar_path)
     if not avatar_path:
         return False
     if not os.path.exists(avatar_path):
@@ -500,10 +537,87 @@ def _blade_avatar(client, guid, avatar_path, wipe):
     return True
 
 
-def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rounds):
+def _avatar_path(p):
+    """Operator input → real path: surrounding quotes off, ~ expanded."""
+    return os.path.expanduser(str(p or "").strip().strip("'\"").strip())
+
+
+def _opt_bool(raw):
+    """''/empty → None (untouched); 'true'/'1'/'yes'/'on' → True; else False."""
+    s = str(raw or "").strip().lower()
+    if not s:
+        return None
+    return s in ("true", "1", "yes", "on")
+
+
+def _blade_settings(client, guid, kind):
+    """
+    ▸ blade — every editable section of the chat, field by field.
+    Each field is applied on its own: a refused setting is logged and the pass
+    moves on — nothing dies because one permission is missing.
+    """
+    s = _state["stats"]
+
+    def apply(what, fn):
+        if _state["dry_run"]:
+            warn(f"DRY RUN — would set {what}")
+            return
+        try:
+            fn()
+            ok(f"set {what}")
+            s["settings_ok"] += 1
+        except Exception as e:
+            err(f"{what} refused — passing without it ({e})")
+            s["settings_failed"] += 1
+
+    restricted = _opt_bool(_state["restricted_content"])
+    if kind == "group":
+        mode = str(_state["slow_mode"]).strip()
+        if mode:
+            if not mode.isdigit():
+                warn("slow_mode must be seconds (digits) — skipped")
+            else:
+                apply(f"slow_mode={mode}s", lambda: client.edit_group_info(guid, slow_mode=mode))
+        rx = str(_state["reactions"]).strip()
+        if rx:
+            if rx in ("All", "Disable"):
+                apply(f"reactions={rx}", lambda: client.edit_group_info(guid, reactions=rx))
+            elif all(x.strip().isdigit() for x in rx.split(",")):
+                ids = [int(x) for x in rx.split(",") if x.strip().isdigit()]
+                apply(f"reactions=ids:{rx}", lambda: client.edit_group_info(guid, reactions=ids))
+            else:
+                warn("reactions must be All / Disable / comma-separated ids — skipped")
+        if restricted is not None:
+            apply(f"is_restricted_content={restricted}",
+                  lambda: client.edit_group_info(guid, is_restricted_content=restricted))
+    else:
+        user = str(_state["chat_username"]).strip().lstrip("@")
+        if user:
+            if len(user) > 32:
+                warn("channel username exceeds Rubika's 32-char limit — truncating")
+                user = user[:32]
+            apply(f"username={user}", lambda: client.edit_channel_info(guid, username=user))
+        ct = str(_state["channel_type"]).strip().capitalize()
+        if ct:
+            if ct not in ("Public", "Private"):
+                warn("channel_type must be Public or Private — skipped")
+            else:
+                apply(f"channel_type={ct}", lambda: client.edit_channel_info(guid, channel_type=ct))
+        sign = _opt_bool(_state["sign_messages"])
+        if sign is not None:
+            apply(f"sign_messages={sign}", lambda: client.edit_channel_info(guid, sign_messages=sign))
+        if restricted is not None:
+            apply(f"is_restricted_content={restricted}",
+                  lambda: client.edit_channel_info(guid, is_restricted_content=restricted))
+
+
+def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rounds, seen):
     """▸ wave — fetch, filter, ban. Returns how many were banned this round."""
     s = _state["stats"]
-    label = f"purge wave {round_no}/{total_rounds}" if total_rounds > 1 else "the purge"
+    if total_rounds == 1:
+        label = "the purge"
+    else:
+        label = f"purge wave {round_no}/{'∞' if total_rounds == 0 else total_rounds}"
     _o(f"reading every member of the {_kind_label(kind)} — {label}…")
     members = _fetch_all_members(client, guid, kind)
     s["members"] = len(members)
@@ -525,10 +639,16 @@ def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rou
             continue
         condemned.append(g)
 
+    fresh = [g for g in condemned if g not in seen]
+    seen.update(condemned)
+
     _o(
-        f"PURGE LIST — {_OX.BLOOD}{len(condemned)}{_OX.RESET} of {s['members']} members "
+        f"PURGE LIST — {_OX.BLOOD}{len(fresh)}{_OX.RESET} of {s['members']} members "
         f"(admins spared: {s['admins']}, bots spared: {s['bots']})"
     )
+    if condemned and not fresh:
+        ok("every listed member is already proscribed — waves complete")
+        return 0
     if not condemned:
         ok("nothing left to purge — the chat is clean")
         return 0
@@ -539,12 +659,12 @@ def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rou
 
     before = s["banned"]
     chunk_size = max(1, _state["ban_chunk"])
-    total = (len(condemned) + chunk_size - 1) // chunk_size
-    for i in range(0, len(condemned), chunk_size):
+    total = (len(fresh) + chunk_size - 1) // chunk_size
+    for i in range(0, len(fresh), chunk_size):
         if _state["stop"]:
             _o(f"{_OX.ASH}⏹ purge stopped by operator")
             break
-        chunk = condemned[i:i + chunk_size]
+        chunk = fresh[i:i + chunk_size]
         n = i // chunk_size + 1
         try:
             client.ban_members(guid, members=chunk)
@@ -568,24 +688,28 @@ def _blade_purge(client, guid, kind, self_guid, admin_guids):
     Every member of the chat is banned EXCEPT: admins/creator (protect_admins),
     bots (protect_bots) and the session account itself. Each wave re-reads the
     member list — banned members drop out of it, so the next wave reaches past
-    Rubika's ~100-member fetch window on large chats. Waves continue until the
-    purge list is empty, the operator hits 'stop', or purge_rounds runs out.
+    Rubika's ~100-member fetch window on large chats. The waves are permanently
+    unlimited: they run until the purge list is empty, whatever the chat size.
+    Loops terminate on: empty purge list, no new targets left (fuse), 'stop',
+    dry run, or a rate limit.
     """
     s = _state["stats"]
     s["admins"] = len(admin_guids)
-    rounds = max(1, min(50, int(_state["purge_rounds"] or 1)))
-    if _state["dry_run"]:
-        rounds = 1
-    for r in range(1, rounds + 1):
+    seen = set()
+    wave = 0
+    while True:
         if _state["stop"]:
             _o(f"{_OX.ASH}⏹ purge stopped by operator")
             break
-        s["rounds"] = r
-        if _purge_round(client, guid, kind, self_guid, admin_guids, r, rounds) <= 0:
+        if wave >= 1000:
+            warn("safety fuse hit after 1000 waves — stopping (should never reach here)")
             break
-        if r < rounds:
-            _o(f"wave {r} spent — rescanning what is left…")
-            _sleep(1.0)
+        wave += 1
+        s["rounds"] = wave
+        if _purge_round(client, guid, kind, self_guid, admin_guids, wave, 0, seen) <= 0:
+            break
+        _o(f"wave {wave} spent — rescanning what is left…")
+        _sleep(1.0)
 
 
 def _unban_wave(client, guid):
@@ -613,8 +737,8 @@ def _engage_worker(client, target, self_guid=None):
     _state["stop"] = False
     s = _state["stats"]
     for key in ("kind", "guid", "members", "scanned", "rounds", "admins", "bots", "banned",
-                "ban_failed", "unbanned", "quiet", "retitled", "rebioed",
-                "avatars_old", "avatars_new"):
+                "ban_failed", "unbanned", "quiet", "settings_ok", "settings_failed",
+                "retitled", "rebioed", "avatars_old", "avatars_new"):
         s[key] = False if key in ("retitled", "rebioed") else (
             None if key in ("kind", "quiet") else 0
         )
@@ -642,6 +766,9 @@ def _engage_worker(client, target, self_guid=None):
             blades.append("re-bio")
         if _state["avatar"]:
             blades.append("avatar")
+        if any((_state["slow_mode"], _state["reactions"], _state["restricted_content"],
+                _state["sign_messages"], _state["chat_username"], _state["channel_type"])):
+            blades.append("settings")
         if _state["ban_all"]:
             blades.append("purge")
         if _state["unban_after"]:
@@ -675,6 +802,10 @@ def _engage_worker(client, target, self_guid=None):
             _blade_avatar(client, guid, _state["avatar"], _state["wipe_avatars"])
         except Exception as e:
             err(f"avatar pass failed — {e}")
+        try:
+            _blade_settings(client, guid, kind)
+        except Exception as e:
+            err(f"settings pass failed — {e}")
 
         if _state["ban_all"]:
             try:
@@ -700,6 +831,7 @@ def _engage_worker(client, target, self_guid=None):
             f"{_OX.VIOLET}◼ engage report{_OX.RESET} — retitled={s['retitled']} "
             f"rebioed={s['rebioed']} avatars_old={s['avatars_old']} avatars_new={s['avatars_new']} "
             f"members={s['members']} scanned={s['scanned']} waves={s['rounds']} banned={s['banned']} failed={s['ban_failed']} "
+            f"settings_ok={s['settings_ok']} settings_failed={s['settings_failed']} "
             f"admins={s['admins']} bots={s['bots']} time={elapsed:.1f}s"
         )
 
@@ -787,7 +919,7 @@ def _prompt_fn():
 
 def _completer(text, line, begidx, endidx):
     cmds = [
-        "target", "engage", "real", "rebrand", "profile", "chunk", "rounds",
+        "target", "engage", "real", "rebrand", "profile", "chunk", "settings",
         "quiet", "unban", "banned", "admins", "status", "log", "stop", "help",
     ]
     return [c for c in cmds if c.startswith(text)]
@@ -901,14 +1033,29 @@ def _subshell_handler(line):
         _state["ban_chunk"] = n
         ok(f"ban chunk size → {n}")
 
-    elif cmd == "rounds":
-        try:
-            n = max(1, int(arg))
-        except ValueError:
-            err("usage: rounds <N> — purge waves, each rescans the member list")
-            return
-        _state["purge_rounds"] = min(50, n)
-        warn(f"purge waves → {_state['purge_rounds']} (rescan until the purge list is empty)")
+    elif cmd == "settings":
+        rows = [
+            ("new title", _state["new_name"] or "(untouched)"),
+            ("new bio", _state["new_bio"] or "(untouched)"),
+            ("new avatar", _state["avatar"] or "(untouched)"),
+            ("wipe avatars", _state["wipe_avatars"]),
+            ("quiet (event messages off during pass)", _state["quiet_mode"]),
+            ("slow_mode secs (group)", _state["slow_mode"] or "(untouched)"),
+            ("reactions (group)", _state["reactions"] or "(untouched)"),
+            ("restricted content (group/channel)", _state["restricted_content"] or "(untouched)"),
+            ("sign messages (channel)", _state["sign_messages"] or "(untouched)"),
+            ("username (channel)", _state["chat_username"] or "(untouched)"),
+            ("channel type (channel)", _state["channel_type"] or "(untouched)"),
+            ("ban waves", "∞ — until the purge list is empty" if _state["ban_all"] else "off"),
+            ("ban chunk / delay", f"{_state['ban_chunk']} members / {_state['ban_delay']}s"),
+            ("protect admins / bots", f"{_state['protect_admins']} / {_state['protect_bots']}"),
+            ("unban after the pass", _state["unban_after"]),
+            ("profile vault", ", ".join(list(_load_profiles())[:6]) or "(empty)"),
+            ("mode", "DRY RUN" if _state["dry_run"] else "LIVE"),
+        ]
+        _o(f"{_OX.EDGE}pending settings — exact values{_OX.RESET}")
+        for k, v in rows:
+            print(f"      {k:<40}: {v}")
 
     elif cmd == "quiet":
         if arg.lower() in ("on", "true", "1", "yes"):
@@ -938,7 +1085,8 @@ def _subshell_handler(line):
         print(f"  {_OX.VIOLET}║{_OX.RESET}  ban_all      : {_OX.LIVE if _state['ban_all'] else _OX.ASH}{_state['ban_all']}{_OX.RESET}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  protect      : admins={_state['protect_admins']} bots={_state['protect_bots']}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  unban_after  : {_state['unban_after']}")
-        print(f"  {_OX.VIOLET}║{_OX.RESET}  waves        : {s['rounds']} · scanned={s['scanned']} · chunk={_state['ban_chunk']} · quiet={'ON' if _state['quiet_mode'] else 'off'}")
+        print(f"  {_OX.VIOLET}║{_OX.RESET}  waves        : {s['rounds']} · scanned={s['scanned']} · chunk={_state['ban_chunk']}")
+        print(f"  {_OX.VIOLET}║{_OX.RESET}  settings     : ok={s['settings_ok']} · refused={s['settings_failed']} · quiet={'ON' if _state['quiet_mode'] else 'off'}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  members      : {s['members']}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  banned       : {_OX.BLOOD}{s['banned']}{_OX.RESET}")
         print(f"  {_OX.VIOLET}║{_OX.RESET}  ban_failed   : {s['ban_failed']}")
@@ -969,7 +1117,7 @@ def _subshell_handler(line):
     {_OX.VIOLET}profile <n>{_OX.RESET}      instant-apply a saved profile
     {_OX.VIOLET}profile del <n>{_OX.RESET}   shatter a saved profile
     {_OX.VIOLET}chunk <N>{_OX.RESET}       members per ban_members call
-    {_OX.VIOLET}rounds <N>{_OX.RESET}      purge waves — each wave rescans members until none left
+    {_OX.VIOLET}settings{_OX.RESET}       every pending group/channel setting, exact values
     {_OX.VIOLET}real{_OX.RESET}           go LIVE (leaves dry-run; bans become irreversible)
     {_OX.VIOLET}unban{_OX.RESET}          lift every ban on the target
     {_OX.VIOLET}banned{_OX.RESET}         list banned members
@@ -1030,23 +1178,28 @@ def run(opts):
         "target":         str(opts.get("target") or OPTIONS["target"]["value"] or "").strip(),
         "new_name":       str(opts.get("new_name") or "").strip(),
         "new_bio":        str(opts.get("new_bio") or "").strip(),
-        "avatar":         str(opts.get("avatar") or "").strip(),
+        "avatar":         os.path.expanduser(str(opts.get("avatar") or "").strip().strip("'\"").strip()),
         "wipe_avatars":   bool(opts.get("wipe_avatars", True)),
         "ban_all":        bool(opts.get("ban_all", True)),
         "protect_admins": bool(opts.get("protect_admins", True)),
         "protect_bots":   bool(opts.get("protect_bots", True)),
         "ban_chunk":      max(1, num("ban_chunk", 10, int)),
         "ban_delay":      max(0.0, num("ban_delay", 2.0)),
-        "purge_rounds":   max(1, num("purge_rounds", 1, int)),
-        "quiet_mode":     bool(opts.get("quiet_mode", False)),
+        "slow_mode":      str(opts.get("slow_mode") or "").strip(),
+        "reactions":      str(opts.get("reactions") or "").strip(),
+        "restricted_content": str(opts.get("restricted_content") or "").strip(),
+        "sign_messages":  str(opts.get("sign_messages") or "").strip(),
+        "chat_username":  str(opts.get("chat_username") or "").strip().lstrip("@"),
+        "channel_type":   str(opts.get("channel_type") or "").strip(),
+        "quiet_mode":     bool(opts.get("quiet_mode", True)),
         "trigger_requires_self": bool(opts.get("trigger_requires_self", True)),
         "profile":        str(opts.get("profile") or "").strip(),
-        "unban_after":    bool(opts.get("unban_after", False)),
-        "dry_run":        bool(opts.get("dry_run", True)),
+        "unban_after":    bool(opts.get("unban_after", True)),
+        "dry_run":        bool(opts.get("dry_run", False)),
         "stats": {
             "kind": None, "guid": None, "members": 0, "admins": 0, "bots": 0,
             "banned": 0, "ban_failed": 0, "unbanned": 0,
-            "scanned": 0, "rounds": 0, "quiet": None,
+            "scanned": 0, "rounds": 0, "quiet": None, "settings_ok": 0, "settings_failed": 0,
             "retitled": False, "rebioed": False,
             "avatars_old": 0, "avatars_new": 0, "started_at": None,
         },
@@ -1055,6 +1208,8 @@ def run(opts):
 
     if _state["dry_run"]:
         warn("DRY RUN is ON — engage simulates everything and sends nothing")
+    else:
+        warn("LIVE MODE — engage sends real API calls (bans are irreversible; set dry_run True for a rehearsal)")
 
     try:
         app = Messenger(session)
@@ -1167,7 +1322,7 @@ def run(opts):
     print(f"  {_OX.VIOLET}◼{_OX.RESET} mode          : "
           f"{_OX.BLOOD + 'LIVE' if not _state['dry_run'] else _OX.ASH + 'DRY RUN'}{_OX.RESET}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} protect       : admins={_state['protect_admins']} · bots={_state['protect_bots']}")
-    print(f"  {_OX.VIOLET}◼{_OX.RESET} purge waves   : {_state['purge_rounds']} · chunk={_state['ban_chunk']} · quiet={'ON' if _state['quiet_mode'] else 'off'}")
+    print(f"  {_OX.VIOLET}◼{_OX.RESET} purge waves   : ∞ (until the purge list is empty) · chunk={_state['ban_chunk']} · quiet={'ON' if _state['quiet_mode'] else 'off'}")
     vault = _load_profiles()
     print(f"  {_OX.VIOLET}◼{_OX.RESET} profile vault : {len(vault)} saved → {', '.join(list(vault)[:6]) or 'empty'}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} type {_OX.EDGE}help{_OX.RESET} in the subshell\n")
