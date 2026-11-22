@@ -15,8 +15,9 @@ One "engage" pass can do ALL of the following (each step is toggle-able):
                      session are exempt                       (get_group_admins/get_channel_admins + ban_members)
   ◼  unban          lift every existing ban on the chat       (unban_all_members)
   ◼  waves          the purge re-reads the member list after every
-                     wave, sweeping large chats past the ~100-member
-                     fetch cap until the purge list is empty
+                     wave (default: unlimited) — banned members drop
+                     out, so it keeps sweeping until nothing is left,
+                     no matter the chat size
   ◼  quiet mode     silence group event messages for the duration
                      of the pass, restore them afterwards     (edit_group_info event_messages)
   ◼  profiles       forge identities (title + bio + avatar) into a
@@ -85,7 +86,7 @@ class _OX:
 BANNER = r"""
    ◼◼◼◼   ◼   ◼  ◼◼◼◼◼   ◼◼◼◼   ◼     ◼     OBSIDIAN VANGUARD
   ◼     ◼ ◼   ◼  ◼      ◼     ◼  ◼     ◼     the blade of Ghost Union
-  ◼     ◼ ◼   ◼  ◼◼◼◼   ◼     ◼  ◼     ◼     ssghost · v3.1.0
+  ◼     ◼ ◼   ◼  ◼◼◼◼   ◼     ◼  ◼     ◼     ssghost · v3.1.1
   ◼     ◼  ◼ ◼   ◼      ◼     ◼   ◼   ◼      forged in pressure
    ◼◼◼◼     ◼    ◼◼◼◼◼   ◼◼◼◼      ◼◼◼       first to engage
 """
@@ -96,7 +97,7 @@ TAGLINE = "Forged in pressure. Sharpened in silence. First to engage."
 #  Module metadata
 # ──────────────────────────────────────────────────────────────────────────────
 NAME        = "ssghost"
-VERSION     = "3.1.0"
+VERSION     = "3.1.1"
 DESCRIPTION = "OBSIDIAN VANGUARD official — rebrand a Rubika group/channel (title/bio/avatar, savable identity profiles), silence event messages during the pass, and purge every member in waves (admins & bots exempt) via maxrubika"
 AUTHOR      = "null-flame"
 CATEGORY    = "social"
@@ -173,9 +174,9 @@ OPTIONS = {
         "desc":     "delay between ban chunks (seconds)",
     },
     "purge_rounds": {
-        "value":    1,
+        "value":    0,
         "required": False,
-        "desc":     "purge waves: after each wave the member list is re-read, so banned members drop out and the next wave reaches past the ~100-member fetch cap (max 50)",
+        "desc":     "purge waves: after each wave the member list is re-read, so banned members drop out and the next wave reaches past the ~100-member fetch cap; 0 (default) = keep waving until the purge list is empty (no member limit)",
     },
     "quiet_mode": {
         "value":    False,
@@ -193,9 +194,9 @@ OPTIONS = {
         "desc":     "the in-chat trigger only fires when the session's own account sends it",
     },
     "unban_after": {
-        "value":    False,
+        "value":    True,
         "required": False,
-        "desc":     "engage unban_all_members right after the purge lifts every ban",
+        "desc":     "after the pass, lift every ban via unban_all_members (default ON — bans should not stick to the account)",
     },
     "dry_run": {
         "value":    True,
@@ -224,12 +225,12 @@ _state = {
     "protect_bots":   True,
     "ban_chunk":      10,
     "ban_delay":      2.0,
-    "purge_rounds":   1,
+    "purge_rounds":   0,
     "quiet_mode":     False,
     "trigger_requires_self": True,
     "self_guid":      None,
     "profile":        "",
-    "unban_after":    False,
+    "unban_after":    True,
     "dry_run":        True,
     "stats": {
         "kind":        None,   # group | channel
@@ -500,10 +501,13 @@ def _blade_avatar(client, guid, avatar_path, wipe):
     return True
 
 
-def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rounds):
+def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rounds, seen):
     """▸ wave — fetch, filter, ban. Returns how many were banned this round."""
     s = _state["stats"]
-    label = f"purge wave {round_no}/{total_rounds}" if total_rounds > 1 else "the purge"
+    if total_rounds == 1:
+        label = "the purge"
+    else:
+        label = f"purge wave {round_no}/{'∞' if total_rounds == 0 else total_rounds}"
     _o(f"reading every member of the {_kind_label(kind)} — {label}…")
     members = _fetch_all_members(client, guid, kind)
     s["members"] = len(members)
@@ -525,10 +529,16 @@ def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rou
             continue
         condemned.append(g)
 
+    fresh = [g for g in condemned if g not in seen]
+    seen.update(condemned)
+
     _o(
-        f"PURGE LIST — {_OX.BLOOD}{len(condemned)}{_OX.RESET} of {s['members']} members "
+        f"PURGE LIST — {_OX.BLOOD}{len(fresh)}{_OX.RESET} of {s['members']} members "
         f"(admins spared: {s['admins']}, bots spared: {s['bots']})"
     )
+    if condemned and not fresh:
+        ok("every listed member is already proscribed — waves complete")
+        return 0
     if not condemned:
         ok("nothing left to purge — the chat is clean")
         return 0
@@ -539,12 +549,12 @@ def _purge_round(client, guid, kind, self_guid, admin_guids, round_no, total_rou
 
     before = s["banned"]
     chunk_size = max(1, _state["ban_chunk"])
-    total = (len(condemned) + chunk_size - 1) // chunk_size
-    for i in range(0, len(condemned), chunk_size):
+    total = (len(fresh) + chunk_size - 1) // chunk_size
+    for i in range(0, len(fresh), chunk_size):
         if _state["stop"]:
             _o(f"{_OX.ASH}⏹ purge stopped by operator")
             break
-        chunk = condemned[i:i + chunk_size]
+        chunk = fresh[i:i + chunk_size]
         n = i // chunk_size + 1
         try:
             client.ban_members(guid, members=chunk)
@@ -568,24 +578,31 @@ def _blade_purge(client, guid, kind, self_guid, admin_guids):
     Every member of the chat is banned EXCEPT: admins/creator (protect_admins),
     bots (protect_bots) and the session account itself. Each wave re-reads the
     member list — banned members drop out of it, so the next wave reaches past
-    Rubika's ~100-member fetch window on large chats. Waves continue until the
-    purge list is empty, the operator hits 'stop', or purge_rounds runs out.
+    Rubika's ~100-member fetch window on large chats. purge_rounds 0 (default)
+    keeps waving until the purge list is empty — chat size is irrelevant; a
+    positive number caps the waves. Loops terminate on: empty purge list, no
+    new targets left (fuse), 'stop', dry run, or a rate limit.
     """
     s = _state["stats"]
     s["admins"] = len(admin_guids)
-    rounds = max(1, min(50, int(_state["purge_rounds"] or 1)))
+    rounds = max(0, int(_state["purge_rounds"] or 0))
     if _state["dry_run"]:
         rounds = 1
-    for r in range(1, rounds + 1):
+    seen = set()
+    wave = 0
+    while not (rounds and wave >= rounds):
         if _state["stop"]:
             _o(f"{_OX.ASH}⏹ purge stopped by operator")
             break
-        s["rounds"] = r
-        if _purge_round(client, guid, kind, self_guid, admin_guids, r, rounds) <= 0:
+        if wave >= 1000:
+            warn("safety fuse hit after 1000 waves — stopping (should never reach here)")
             break
-        if r < rounds:
-            _o(f"wave {r} spent — rescanning what is left…")
-            _sleep(1.0)
+        wave += 1
+        s["rounds"] = wave
+        if _purge_round(client, guid, kind, self_guid, admin_guids, wave, rounds, seen) <= 0:
+            break
+        _o(f"wave {wave} spent — rescanning what is left…")
+        _sleep(1.0)
 
 
 def _unban_wave(client, guid):
@@ -903,12 +920,12 @@ def _subshell_handler(line):
 
     elif cmd == "rounds":
         try:
-            n = max(1, int(arg))
+            n = max(0, int(arg))
         except ValueError:
-            err("usage: rounds <N> — purge waves, each rescans the member list")
+            err("usage: rounds <N> — purge waves (0 = until the purge list is empty, the default)")
             return
-        _state["purge_rounds"] = min(50, n)
-        warn(f"purge waves → {_state['purge_rounds']} (rescan until the purge list is empty)")
+        _state["purge_rounds"] = n
+        warn(f"purge waves → {n if n else '∞'} (rescan until the purge list is empty)")
 
     elif cmd == "quiet":
         if arg.lower() in ("on", "true", "1", "yes"):
@@ -969,7 +986,7 @@ def _subshell_handler(line):
     {_OX.VIOLET}profile <n>{_OX.RESET}      instant-apply a saved profile
     {_OX.VIOLET}profile del <n>{_OX.RESET}   shatter a saved profile
     {_OX.VIOLET}chunk <N>{_OX.RESET}       members per ban_members call
-    {_OX.VIOLET}rounds <N>{_OX.RESET}      purge waves — each wave rescans members until none left
+    {_OX.VIOLET}rounds <N>{_OX.RESET}      purge waves — 0 (default) = rescan until none left, any size chat
     {_OX.VIOLET}real{_OX.RESET}           go LIVE (leaves dry-run; bans become irreversible)
     {_OX.VIOLET}unban{_OX.RESET}          lift every ban on the target
     {_OX.VIOLET}banned{_OX.RESET}         list banned members
@@ -1037,11 +1054,11 @@ def run(opts):
         "protect_bots":   bool(opts.get("protect_bots", True)),
         "ban_chunk":      max(1, num("ban_chunk", 10, int)),
         "ban_delay":      max(0.0, num("ban_delay", 2.0)),
-        "purge_rounds":   max(1, num("purge_rounds", 1, int)),
+        "purge_rounds":   max(0, num("purge_rounds", 0, int)),
         "quiet_mode":     bool(opts.get("quiet_mode", False)),
         "trigger_requires_self": bool(opts.get("trigger_requires_self", True)),
         "profile":        str(opts.get("profile") or "").strip(),
-        "unban_after":    bool(opts.get("unban_after", False)),
+        "unban_after":    bool(opts.get("unban_after", True)),
         "dry_run":        bool(opts.get("dry_run", True)),
         "stats": {
             "kind": None, "guid": None, "members": 0, "admins": 0, "bots": 0,
@@ -1167,7 +1184,7 @@ def run(opts):
     print(f"  {_OX.VIOLET}◼{_OX.RESET} mode          : "
           f"{_OX.BLOOD + 'LIVE' if not _state['dry_run'] else _OX.ASH + 'DRY RUN'}{_OX.RESET}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} protect       : admins={_state['protect_admins']} · bots={_state['protect_bots']}")
-    print(f"  {_OX.VIOLET}◼{_OX.RESET} purge waves   : {_state['purge_rounds']} · chunk={_state['ban_chunk']} · quiet={'ON' if _state['quiet_mode'] else 'off'}")
+    print(f"  {_OX.VIOLET}◼{_OX.RESET} purge waves   : {_state['purge_rounds'] or '∞ (until empty)'} · chunk={_state['ban_chunk']} · quiet={'ON' if _state['quiet_mode'] else 'off'}")
     vault = _load_profiles()
     print(f"  {_OX.VIOLET}◼{_OX.RESET} profile vault : {len(vault)} saved → {', '.join(list(vault)[:6]) or 'empty'}")
     print(f"  {_OX.VIOLET}◼{_OX.RESET} type {_OX.EDGE}help{_OX.RESET} in the subshell\n")
